@@ -10,7 +10,7 @@ from itertools import count
 from case import ANY, ContextMock, Mock, call, mock, skip, patch
 
 from kombu import Connection, Exchange, Queue, Consumer, Producer
-from kombu.exceptions import InconsistencyError, VersionMismatch
+from kombu.exceptions import VersionMismatch
 from kombu.five import Empty, Queue as _Queue, bytes_if_py2
 from kombu.transport import virtual
 from kombu.utils import eventio  # patch poll
@@ -847,13 +847,12 @@ class test_Channel:
             ('celery', '', 'celery'),
         ]
 
-        # ... then for some reason, the _kombu.binding.celery key gets lost
+        # Remove one last queue from exchange. After this call no queue
+        # is in bound to exchange.
         channel.client.srem(key)
 
-        # which raises a channel error so that the consumer/publisher
-        # can recover by redeclaring the required entities.
-        with pytest.raises(InconsistencyError):
-            self.channel.get_table('celery')
+        # get_table() should return empty list of queues
+        assert self.channel.get_table('celery') == []
 
     def test_socket_connection(self):
         with patch('kombu.transport.redis.Channel._create_client'):
