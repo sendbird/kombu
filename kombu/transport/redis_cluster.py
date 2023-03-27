@@ -8,8 +8,8 @@ from kombu.utils.eventio import READ, ERR
 from kombu.utils.json import loads
 from kombu.utils.uuid import uuid
 
-from .transport import virtual
-from .transport.redis import (
+from . import virtual
+from .redis import (
     Channel as RedisChannel,
     MultiChannelPoller,
     MutexHeld,
@@ -18,14 +18,10 @@ from .transport.redis import (
 )
 
 try:
-    from rediscluster.connection import (
-        ClusterConnection,
-        ClusterConnectionPool,
-    )
-    from rediscluster.exceptions import MovedError
-    import rediscluster
+    import redis
+    from redis.exceptions import MovedError, RedisClusterException
 except ImportError:
-    rediscluster = None
+    redis = None
 
 
 # copied from `kombu.transport.redis` and disable pipeline transcation
@@ -45,7 +41,6 @@ def Mutex(client, name, expire):
                 client.delete(name)
 
 
-# copied from `kombu.transport.redis` to replace `Mutex` implementation.
 class QoS(RedisQoS):
 
     def restore_visible(self, start=0, num=10, interval=10):
@@ -76,6 +71,11 @@ class QoS(RedisQoS):
             except MutexHeld:
                 pass
 
+class RedisNodeConnection():
+    def __init__(self, node):
+        self.node = node
+        self.client = self.node.redis_connection.client()
+
 
 class ClusterPoller(MultiChannelPoller):
 
@@ -85,10 +85,7 @@ class ClusterPoller(MultiChannelPoller):
         if ident in self._chan_to_sock:
             self._unregister(*ident)
 
-        if conn._sock is None:
-            conn.connect()
-
-        sock = conn._sock
+        sock = conn.client.connection._sock
         self._fd_to_chan[sock.fileno()] = (channel, conn, cmd)
         self._chan_to_sock[ident] = sock
         self.poller.register(sock, self.eventflags)
@@ -103,7 +100,7 @@ class ClusterPoller(MultiChannelPoller):
         for conn in conns:
             ident = (channel, channel.client, conn, 'BRPOP')
 
-            if (conn._sock is None or ident not in self._chan_to_sock):
+            if (ident not in self._chan_to_sock):
                 channel._in_poll = False
                 self._register(*ident)
 
@@ -115,7 +112,7 @@ class ClusterPoller(MultiChannelPoller):
             return [conn for _, _, conn, _ in self._chan_to_sock]
 
         return [
-            channel.client.connection_pool.get_connection_by_key(key, 'NOOP')
+            RedisNodeConnection(channel.client.nodes_manager.get_node_from_slot(channel.client.keyslot(key)))
             for key in channel.active_queues
         ]
 
@@ -139,7 +136,6 @@ class ClusterPoller(MultiChannelPoller):
 class Channel(RedisChannel):
 
     QoS = QoS
-    connection_class = ClusterConnection
     socket_keepalive = True
 
     namespace = 'default'
@@ -185,20 +181,14 @@ class Channel(RedisChannel):
             yield self.client
 
     def _get_pool(self, asynchronous=False):
-        params = self._connparams(asynchronous=asynchronous)
-        params['skip_full_coverage_check'] = True
-        return ClusterConnectionPool(**params)
+        raise NotImplementedError
 
     def _get_client(self):
-        return rediscluster.StrictRedisCluster
+        return redis.RedisCluster
 
     def _create_client(self, asynchronous=False):
-        params = {'skip_full_coverage_check': True}
-
-        if asynchronous:
-            params['connection_pool'] = self.async_pool
-        else:
-            params['connection_pool'] = self.pool
+        conninfo = self.connection.client
+        params = {'skip_full_coverage_check': True, 'host': conninfo.hostname, 'port': conninfo.port}
 
         return self.Client(**params)
 
@@ -209,40 +199,38 @@ class Channel(RedisChannel):
 
         self._in_poll = True
         timeout = timeout or 0
-        pool = self.client.connection_pool
         node_to_keys = {}
 
         for key in queues:
-            node = pool.get_node_by_slot(pool.nodes.keyslot(key))
-            node_to_keys.setdefault(node['name'], []).append(key)
+            node = self.client.nodes_manager.get_node_from_slot(self.client.keyslot(key))
+            node_to_keys.setdefault(node.name, []).append(key)
 
         for chan, client, conn, cmd in self.connection.cycle._chan_to_sock:
             expected = (self, self.client, 'BRPOP')
-            keys = node_to_keys.get(conn.node['name'])
+            keys = node_to_keys.get(conn.node.name)
 
             if keys and (chan, client, cmd) == expected:
                 for key in keys:
-                    conn.send_command('BRPOP', key, timeout)
+                    conn.client.connection.send_command('BRPOP', key, timeout)
 
     def _brpop_read(self, **options):
-        client = self.client
-
         try:
             conn = options.pop('conn')
 
             try:
-                resp = client.parse_response(conn, 'BRPOP', **options)
+                resp = conn.client.parse_response(conn.client.connection, 'BRPOP', **options)
             except self.connection_errors:
-                conn.disconnect()
+                conn.client.connection.disconnect()
                 raise Empty()
-            except MovedError as err:
-                # copied from rediscluster/client.py
-                client.refresh_table_asap = True
-                client.connection_pool.nodes.increment_reinitialize_counter()
-                node = client.connection_pool.nodes.set_node(
-                    err.host, err.port, server_type='master'
-                )
-                client.connection_pool.nodes.slots[err.slot_id][0] = node
+            except MovedError as e:
+                # Copied from redis-py cluster.py
+                self.client.reinitialize_counter += 1
+                if self.client._should_reinitialized():
+                    self.client.nodes_manager.initialize()
+                    # Reset the counter
+                    self.client.reinitialize_counter = 0
+                else:
+                    self.client.nodes_manager.update_moved_exception(e)
                 raise Empty()
 
             if resp:
@@ -259,23 +247,24 @@ class Channel(RedisChannel):
             self.client.parse_response(conn, cmd)
 
 
-class RedisClusterTransport(RedisTransport):
+class Transport(RedisTransport):
 
     Channel = Channel
 
     driver_type = 'redis-cluster'
     driver_name = driver_type
+    connection_errors = RedisTransport.connection_errors + (RedisClusterException,)
 
     implements = virtual.Transport.implements.extend(
         asynchronous=True, exchange_type=frozenset(['direct'])
     )
 
     def __init__(self, *args, **kwargs):
-        if rediscluster is None:
-            raise ImportError('dependency missing: redis-py-cluster')
+        if redis is None:
+            raise ImportError('dependency missing: redis')
 
         super().__init__(*args, **kwargs)
         self.cycle = ClusterPoller()
 
     def driver_version(self):
-        return rediscluster.__version__
+        return redis.__version__
