@@ -74,7 +74,7 @@ class QoS(RedisQoS):
 class RedisNodeConnection():
     def __init__(self, node):
         self.node = node
-        self.client = self.node.redis_connection.client()
+        self.client = None
 
 
 class ClusterPoller(MultiChannelPoller):
@@ -85,6 +85,9 @@ class ClusterPoller(MultiChannelPoller):
         if ident in self._chan_to_sock:
             self._unregister(*ident)
 
+        if not conn.client:
+            conn.client = conn.node.redis_connection.client()
+
         sock = conn.client.connection._sock
         self._fd_to_chan[sock.fileno()] = (channel, conn, cmd)
         self._chan_to_sock[ident] = sock
@@ -93,6 +96,10 @@ class ClusterPoller(MultiChannelPoller):
     def _unregister(self, channel, client, conn, cmd):
         sock = self._chan_to_sock[(channel, client, conn, cmd)]
         self.poller.unregister(sock)
+
+        if conn.client:
+            conn.client.close()
+            conn.client = None
 
     def _register_BRPOP(self, channel):
         conns = self._get_conns_for_channel(channel)
@@ -220,7 +227,8 @@ class Channel(RedisChannel):
             try:
                 resp = conn.client.parse_response(conn.client.connection, 'BRPOP', **options)
             except self.connection_errors:
-                conn.client.connection.disconnect()
+                conn.client.close()
+                conn.client = None
                 raise Empty()
             except MovedError as e:
                 # Copied from redis-py cluster.py
