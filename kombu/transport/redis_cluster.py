@@ -139,6 +139,21 @@ class ClusterPoller(MultiChannelPoller):
         if chan.qos.can_consume():
             return chan.handlers[cmd](**{'conn': conn})
 
+class RedisClusterConnection():
+    connections = {}
+    @classmethod
+    def get_connection(cls, host, port):
+        key = (host, port)
+        if key not in cls.connections:
+            cls.connections[key] = cls.create_connection(host, port)
+        return cls.connections[key]
+
+    @classmethod
+    def create_connection(cls, host, port):
+        params = {'skip_full_coverage_check': True, 'host': host, 'port': port}
+
+        return redis.RedisCluster(**params)
+
 
 class Channel(RedisChannel):
 
@@ -187,17 +202,10 @@ class Channel(RedisChannel):
         else:
             yield self.client
 
-    def _get_pool(self, asynchronous=False):
-        raise NotImplementedError
-
-    def _get_client(self):
-        return redis.RedisCluster
-
     def _create_client(self, asynchronous=False):
         conninfo = self.connection.client
-        params = {'skip_full_coverage_check': True, 'host': conninfo.hostname, 'port': conninfo.port}
 
-        return self.Client(**params)
+        return RedisClusterConnection.get_connection(conninfo.hostname, conninfo.port)
 
     def _brpop_start(self, timeout=1):
         queues = self._queue_cycle.consume(len(self.active_queues))
