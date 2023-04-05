@@ -115,13 +115,19 @@ class ClusterPoller(MultiChannelPoller):
             channel._brpop_start()
 
     def _get_conns_for_channel(self, channel):
-        if self._chan_to_sock:
-            return [conn for _, _, conn, _ in self._chan_to_sock]
+        result = []
+        conns = [conn for _, _, conn, _ in self._chan_to_sock]
+        for key in channel.active_queues:
+            node = channel.client.nodes_manager.get_node_from_slot(channel.client.keyslot(key))
 
-        return [
-            RedisNodeConnection(channel.client.nodes_manager.get_node_from_slot(channel.client.keyslot(key)))
-            for key in channel.active_queues
-        ]
+            try:
+                conn = next(x for x in conns if x.node == node)
+                conns.remove(conn)
+            except StopIteration:
+                conn = RedisNodeConnection(node)
+            result.append(conn)
+
+        return result
 
     def handle_event(self, fileno, event):
         if event & READ:
@@ -220,13 +226,15 @@ class Channel(RedisChannel):
             node = self.client.nodes_manager.get_node_from_slot(self.client.keyslot(key))
             node_to_keys.setdefault(node.name, []).append(key)
 
+        self.sent = 0
         for chan, client, conn, cmd in self.connection.cycle._chan_to_sock:
             expected = (self, self.client, 'BRPOP')
             keys = node_to_keys.get(conn.node.name)
 
             if keys and (chan, client, cmd) == expected:
-                for key in keys:
-                    conn.client.connection.send_command('BRPOP', key, timeout)
+                key = keys.pop()
+                conn.client.connection.send_command('BRPOP', key, timeout)
+                self.sent += 1
 
     def _brpop_read(self, **options):
         try:
@@ -254,13 +262,14 @@ class Channel(RedisChannel):
                 dest = bytes_to_str(dest).rsplit(self.sep, 1)[0]
                 self._queue_cycle.rotate(dest)
                 self.connection._deliver(loads(bytes_to_str(item)), dest)
-                return True
         finally:
-            self._in_poll = False
+            self.sent -= 1
+            if self.sent == 0:
+                self._in_poll = False
 
     def _poll_error(self, cmd, conn, **options):
         if cmd == 'BRPOP':
-            self.client.parse_response(conn, cmd)
+            conn.client.parse_response(conn.client.connection, cmd, **options)
 
 
 class Transport(RedisTransport):
