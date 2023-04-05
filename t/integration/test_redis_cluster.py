@@ -14,7 +14,7 @@ from .common import (BasicFunctionality)
 
 
 def get_connection(
-        hostname, port, vhost, user_name=None, password=None,
+        hostname, port, user_name=None, password=None,
         transport_options=None):
 
     credentials = f'{user_name}:{password}@' if user_name else ''
@@ -31,9 +31,6 @@ def connection(request):
     return get_connection(
         hostname=os.environ.get('REDIS_HOST', 'localhost'),
         port=os.environ.get('REDIS_6379_TCP', '7000'),
-        vhost=getattr(
-            request.config, "slaveinput", {}
-        ).get("slaveid", None),
         transport_options=request.param
     )
 
@@ -51,3 +48,22 @@ class test_RedisBasicFunctionality(BasicFunctionality):
         with pytest.raises(redis.exceptions.RedisClusterException) as ex:
             invalid_connection.connection
         assert ex.type in Transport.connection_errors
+
+def test_many_queue():
+    connection = get_connection(
+        hostname=os.environ.get('REDIS_HOST', 'localhost'),
+        port=os.environ.get('REDIS_6379_TCP', '7000')
+    )
+    with connection as conn:
+        queues = []
+        for i in range(50):
+            queues.append(conn.SimpleQueue(f'simple_queue_test_{i}'))
+
+        for i in range(50):
+            queues[i].put({'Hello': 'World'}, headers={'k1': 'v1'})
+            message = queues[i].get(timeout=60)
+            assert message.payload == {'Hello': 'World'}
+            assert message.content_type == 'application/json'
+            assert message.content_encoding == 'utf-8'
+            assert message.headers == {'k1': 'v1'}
+            message.ack()
