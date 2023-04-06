@@ -143,21 +143,6 @@ class ClusterPoller(MultiChannelPoller):
         if chan.qos.can_consume():
             return chan.handlers[cmd](**{'conn': conn})
 
-class RedisClusterConnection():
-    connections = {}
-    @classmethod
-    def get_connection(cls, host, port):
-        key = (host, port)
-        if key not in cls.connections:
-            cls.connections[key] = cls.create_connection(host, port)
-        return cls.connections[key]
-
-    @classmethod
-    def create_connection(cls, host, port):
-        params = {'skip_full_coverage_check': True, 'host': host, 'port': port}
-
-        return redis.RedisCluster(**params)
-
 
 class Channel(RedisChannel):
 
@@ -207,9 +192,7 @@ class Channel(RedisChannel):
             yield self.client
 
     def _create_client(self, asynchronous=False):
-        conninfo = self.connection.client
-
-        return RedisClusterConnection.get_connection(conninfo.hostname, conninfo.port)
+        return self.connection.cluster_connection
 
     def _brpop_start(self, timeout=1):
         queues = self._queue_cycle.consume(len(self.active_queues))
@@ -277,6 +260,9 @@ class Transport(RedisTransport):
 
         super().__init__(*args, **kwargs)
         self.cycle = ClusterPoller()
+
+        params = {'skip_full_coverage_check': True, 'host': self.client.hostname, 'port': self.client.port}
+        self.cluster_connection = redis.RedisCluster(**params)
 
     def driver_version(self):
         return redis.__version__
