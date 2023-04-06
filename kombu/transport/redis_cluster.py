@@ -72,10 +72,10 @@ class QoS(RedisQoS):
                 pass
 
 class RedisNodeConnection():
-    def __init__(self, node):
-        self.node = node
+    def __init__(self, key):
         self.client = None
-
+        self.in_poll = False
+        self.key = key
 
 class ClusterPoller(MultiChannelPoller):
 
@@ -86,7 +86,8 @@ class ClusterPoller(MultiChannelPoller):
             self._unregister(*ident)
 
         if not conn.client:
-            conn.client = conn.node.redis_connection.client()
+            node = channel.client.nodes_manager.get_node_from_slot(channel.client.keyslot(conn.key))
+            conn.client = node.redis_connection.client()
 
         sock = conn.client.connection._sock
         self._fd_to_chan[sock.fileno()] = (channel, conn, cmd)
@@ -109,23 +110,19 @@ class ClusterPoller(MultiChannelPoller):
             ident = (channel, channel.client, conn, 'BRPOP')
 
             if (ident not in self._chan_to_sock):
-                channel._in_poll = False
                 self._register(*ident)
 
-        if not channel._in_poll:  # send BRPOP
-            channel._brpop_start()
+        channel._brpop_start()
 
     def _get_conns_for_channel(self, channel):
         result = []
         conns = [conn for _, _, conn, _ in self._chan_to_sock]
         for key in channel.active_queues:
-            node = channel.client.nodes_manager.get_node_from_slot(channel.client.keyslot(key))
-
             try:
-                conn = next(x for x in conns if x.node == node)
+                conn = next(x for x in conns if x.key == key)
                 conns.remove(conn)
             except StopIteration:
-                conn = RedisNodeConnection(node)
+                conn = RedisNodeConnection(key)
             result.append(conn)
 
         return result
@@ -214,60 +211,48 @@ class Channel(RedisChannel):
 
         return RedisClusterConnection.get_connection(conninfo.hostname, conninfo.port)
 
-    def _brpop_start(self, timeout=0.1):
+    def _brpop_start(self, timeout=1):
         queues = self._queue_cycle.consume(len(self.active_queues))
         if not queues:
             return
 
-        self._in_poll = True
         timeout = timeout or 0
-        node_to_keys = {}
 
         for key in queues:
-            node = self.client.nodes_manager.get_node_from_slot(self.client.keyslot(key))
-            node_to_keys.setdefault(node.name, []).append(key)
-
-        self.sent = 0
-        for chan, client, conn, cmd in self.connection.cycle._chan_to_sock:
-            expected = (self, self.client, 'BRPOP')
-            keys = node_to_keys.get(conn.node.name)
-
-            if keys and (chan, client, cmd) == expected:
-                key = keys.pop()
-                conn.client.connection.send_command('BRPOP', key, timeout)
-                self.sent += 1
+            for _, _, conn, _ in self.connection.cycle._chan_to_sock:
+                if conn.key == key and conn.in_poll == False:
+                    conn.in_poll = True
+                    conn.client.connection.send_command('BRPOP', key, timeout)
+                    break
 
     def _brpop_read(self, **options):
+        conn = options.pop('conn')
+
         try:
-            conn = options.pop('conn')
+            resp = conn.client.parse_response(conn.client.connection, 'BRPOP', **options)
 
-            try:
-                resp = conn.client.parse_response(conn.client.connection, 'BRPOP', **options)
-            except self.connection_errors:
-                conn.client.close()
-                conn.client = None
-                raise Empty()
-            except MovedError as e:
-                # Copied from redis-py cluster.py
-                self.client.reinitialize_counter += 1
-                if self.client._should_reinitialized():
-                    self.client.nodes_manager.initialize()
-                    # Reset the counter
-                    self.client.reinitialize_counter = 0
-                else:
-                    self.client.nodes_manager.update_moved_exception(e)
-                raise Empty()
+            conn.client.connection.send_command('BRPOP', conn.key, 1) # schedule next BRPOP
+        except self.connection_errors:
+            conn.client.close()
+            conn.client = None
+            raise Empty()
+        except MovedError as e:
+            # Copied from redis-py cluster.py
+            self.client.reinitialize_counter += 1
+            if self.client._should_reinitialized():
+                self.client.nodes_manager.initialize()
+                # Reset the counter
+                self.client.reinitialize_counter = 0
+            else:
+                self.client.nodes_manager.update_moved_exception(e)
+            raise Empty()
 
-            if resp:
-                dest, item = resp
-                dest = bytes_to_str(dest).rsplit(self.sep, 1)[0]
-                self._queue_cycle.rotate(dest)
-                self.connection._deliver(loads(bytes_to_str(item)), dest)
-        finally:
-            self.sent -= 1
-            if self.sent == 0:
-                self._in_poll = False
-                return True
+        if resp:
+            dest, item = resp
+            dest = bytes_to_str(dest).rsplit(self.sep, 1)[0]
+            self._queue_cycle.rotate(dest)
+            self.connection._deliver(loads(bytes_to_str(item)), dest)
+            return True
 
     def _poll_error(self, cmd, conn, **options):
         if cmd == 'BRPOP':
