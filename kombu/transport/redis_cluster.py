@@ -101,6 +101,7 @@ class ClusterPoller(MultiChannelPoller):
             conn.client.close()
             conn.client = None
 
+
     def _register_BRPOP(self, channel):
         conns = self._get_conns_for_channel(channel)
 
@@ -131,7 +132,7 @@ class ClusterPoller(MultiChannelPoller):
 
     def handle_event(self, fileno, event):
         if event & READ:
-            return self.on_readable(fileno), self
+            return self.on_readable(fileno)
         elif event & ERR:
             chan, conn, cmd = self._fd_to_chan[fileno]
             chan._poll_error(cmd, conn)
@@ -266,6 +267,7 @@ class Channel(RedisChannel):
             self.sent -= 1
             if self.sent == 0:
                 self._in_poll = False
+                return True
 
     def _poll_error(self, cmd, conn, **options):
         if cmd == 'BRPOP':
