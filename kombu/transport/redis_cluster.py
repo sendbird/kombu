@@ -214,7 +214,7 @@ class Channel(RedisChannel):
 
         return RedisClusterConnection.get_connection(conninfo.hostname, conninfo.port)
 
-    def _brpop_start(self, timeout=1):
+    def _brpop_start(self, timeout=0.1):
         queues = self._queue_cycle.consume(len(self.active_queues))
         if not queues:
             return
