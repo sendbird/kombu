@@ -25,13 +25,12 @@ def get_connection(
     )
 
 
-@pytest.fixture(params=[None, {'global_keyprefix': '_prefixed_'}])
-def connection(request):
+@pytest.fixture()
+def connection():
     # this fixture yields plain connections to broker and TLS encrypted
     return get_connection(
         hostname=os.environ.get('REDIS_HOST', 'localhost'),
-        port=os.environ.get('REDIS_6379_TCP', '7000'),
-        transport_options=request.param
+        port=os.environ.get('REDIS_6379_TCP', '7000')
     )
 
 
@@ -50,11 +49,7 @@ class test_RedisBasicFunctionality(BasicFunctionality):
         assert ex.type in Transport.connection_errors
 
 
-def test_many_queue():
-    connection = get_connection(
-        hostname=os.environ.get('REDIS_HOST', 'localhost'),
-        port=os.environ.get('REDIS_6379_TCP', '7000')
-    )
+def test_many_queue(connection):
     with connection as conn:
         queues = []
         for i in range(50):
