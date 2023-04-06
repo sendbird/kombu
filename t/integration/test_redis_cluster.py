@@ -49,6 +49,7 @@ class test_RedisBasicFunctionality(BasicFunctionality):
             invalid_connection.connection
         assert ex.type in Transport.connection_errors
 
+
 def test_many_queue():
     connection = get_connection(
         hostname=os.environ.get('REDIS_HOST', 'localhost'),
