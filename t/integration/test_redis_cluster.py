@@ -57,11 +57,13 @@ def test_many_queue():
     with connection as conn:
         queues = []
         for i in range(50):
-            queues.append(conn.SimpleQueue(f'simple_queue_test_{i}'))
+            queue = conn.SimpleQueue(f'simple_queue_test_{i}')
+            queue.put({'Hello': 'World'}, headers={'k1': 'v1'})
+
+            queues.append(queue)
 
         for i in range(50):
-            queues[i].put({'Hello': 'World'}, headers={'k1': 'v1'})
-            message = queues[i].get(timeout=60)
+            message = queues[i].get(timeout=10)
             assert message.payload == {'Hello': 'World'}
             assert message.content_type == 'application/json'
             assert message.content_encoding == 'utf-8'
