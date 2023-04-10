@@ -264,5 +264,10 @@ class Transport(RedisTransport):
         params = {'skip_full_coverage_check': True, 'host': self.client.hostname, 'port': self.client.port}
         self.cluster_connection = redis.RedisCluster(**params)
 
+    def close_connection(self, connection):
+        super().close_connection(connection)
+
+        self.cluster_connection.close()
+
     def driver_version(self):
         return redis.__version__
