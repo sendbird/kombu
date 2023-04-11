@@ -2,7 +2,6 @@ from contextlib import contextmanager
 from time import time
 
 from kombu.five import Empty
-from kombu.utils.compat import _detect_environment
 from kombu.utils.encoding import bytes_to_str
 from kombu.utils.eventio import READ, ERR
 from kombu.utils.json import loads
@@ -53,10 +52,6 @@ class QoS(RedisQoS):
                     self.unacked_mutex_key,
                     self.unacked_mutex_expire,
                 ):
-                    env = _detect_environment()
-                    if env == 'gevent':
-                        ceil = time()
-
                     visible = client.zrevrangebyscore(
                         self.unacked_index_key,
                         ceil,
