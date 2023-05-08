@@ -202,6 +202,12 @@ class Channel(RedisChannel):
         else:
             yield self.client
 
+    def close(self):
+        for _, _, conn, _ in self.connection.cycle._chan_to_sock:
+            conn.client.close()
+
+        return super().close()
+
     def _create_client(self, asynchronous=False):
         conninfo = self.connection.client
 
