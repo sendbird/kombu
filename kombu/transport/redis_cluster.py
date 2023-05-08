@@ -1,7 +1,7 @@
 from contextlib import contextmanager
 from time import time
+from queue import Empty
 
-from kombu.five import Empty
 from kombu.utils.encoding import bytes_to_str
 from kombu.utils.eventio import READ, ERR
 from kombu.utils.json import loads
@@ -159,7 +159,7 @@ class Channel(RedisChannel):
     QoS = QoS
     socket_keepalive = True
 
-    namespace = 'default'
+    namespace = '{default}'
     keyprefix_queue = '/{namespace}/_kombu/binding%s'
     keyprefix_fanout = '/{namespace}/_kombu/fanout.'
     unacked_key = '/{namespace}/_kombu/unacked'
@@ -187,11 +187,12 @@ class Channel(RedisChannel):
             'unacked_mutex_key',
         ]
 
+        super().__init__(conn, *args, **kwargs)
+
         for key in keys:
             value = options.get(key, getattr(self, key))
-            options[key] = value.format(namespace=namespace)
+            setattr(self, key, value.format(namespace=namespace))
 
-        super().__init__(conn, *args, **kwargs)
         self.client.info()
 
     @contextmanager
