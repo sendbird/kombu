@@ -153,6 +153,12 @@ class RedisClusterConnection():
 
         return redis.RedisCluster(**params)
 
+    @classmethod
+    def close(cls):
+        for conn in cls.connections.values():
+            conn.close()
+        cls.connections = {}
+
 
 class Channel(RedisChannel):
 
@@ -275,3 +281,8 @@ class Transport(RedisTransport):
 
     def driver_version(self):
         return redis.__version__
+
+    def close_connection(self, connection):
+        super().close_connection(connection)
+
+        RedisClusterConnection.close()
