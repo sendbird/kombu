@@ -1,0 +1,12 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: kombu
+  description: kombu - Messaging library for Python
+  annotations:
+    github.com/project-slug: sendbird/kombu
+spec:
+  type: library
+  lifecycle: production
+  owner: server-foundation-team
+  system: sendbird-chat
