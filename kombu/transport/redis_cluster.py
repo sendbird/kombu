@@ -43,6 +43,9 @@ def Mutex(client, name, expire):
 class QoS(RedisQoS):
 
     def restore_visible(self, start=0, num=10, interval=10):
+        self._vrestore_count += 1
+        if (self._vrestore_count - 1) % interval:
+            return
         with self.channel.conn_or_acquire() as client:
             ceil = time() - self.visibility_timeout
 
