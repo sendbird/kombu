@@ -1,10 +1,11 @@
 from contextlib import contextmanager
 from time import time
 from queue import Empty
+from collections import defaultdict
 
 from kombu.utils.encoding import bytes_to_str
 from kombu.utils.eventio import READ, ERR
-from kombu.utils.json import loads
+from kombu.utils.json import loads, dumps
 from kombu.utils.uuid import uuid
 
 from . import virtual
@@ -41,22 +42,76 @@ def Mutex(client, name, expire):
 
 
 class QoS(RedisQoS):
+    def __init__(self, *args, **kwargs):
+        super(QoS, self).__init__(*args, **kwargs)
+        self._vrestore_count = defaultdict(int)
 
-    def restore_visible(self, start=0, num=10, interval=10):
-        self._vrestore_count += 1
-        if (self._vrestore_count - 1) % interval:
+    def append(self, message, delivery_tag):
+        delivery = message.delivery_info
+        EX, RK = delivery['exchange'], delivery['routing_key']
+        zadd_args = [{delivery_tag: time()}]
+
+        # RK is queue
+        unacked_index_key = self.unacked_index_key.format(queue=RK)
+        unacked_key = self.unacked_key.format(queue=RK)
+
+        with self.pipe_or_acquire() as pipe:
+            pipe.zadd(unacked_index_key, *zadd_args) \
+                .hset(unacked_key, delivery_tag,
+                      dumps([message._raw, EX, RK])) \
+                .execute()
+            super(RedisQoS, self).append(message, delivery_tag)
+
+    def restore_unacked(self, client=None):
+        with self.channel.conn_or_acquire(client) as client:
+            for [tag, message] in self._delivered.items():
+                routing_key = message.delivery_info['routing_key']
+                self.restore_by_tag(tag, client=client, queue=routing_key)
+        self._delivered.clear()
+
+    def ack(self, delivery_tag):
+        # Message is not added to _delivered if no_ack is true
+        if delivery_tag not in self._delivered:
+            super(RedisQoS, self).ack(delivery_tag)
+            return
+        message = self._delivered[delivery_tag]
+        routing_key = message.delivery_info['routing_key']
+        self._remove_from_indices(delivery_tag, queue=routing_key).execute()
+        super(RedisQoS, self).ack(delivery_tag)
+
+    def reject(self, delivery_tag, requeue=False):
+        message = self._delivered[delivery_tag]
+        if requeue:
+            routing_key = message.delivery_info['routing_key']
+            self.restore_by_tag(delivery_tag, leftmost=True, queue=routing_key)
+        self.ack(delivery_tag)
+
+    def _remove_from_indices(self, delivery_tag, pipe=None, queue=''):
+        unacked_index_key = self.unacked_index_key.format(queue=queue)
+        unacked_key = self.unacked_key.format(queue=queue)
+
+        with self.pipe_or_acquire(pipe) as pipe:
+            return pipe.zrem(unacked_index_key, delivery_tag) \
+                       .hdel(unacked_key, delivery_tag)
+
+    def restore_visible(self, start=0, num=10, interval=100, queue=''):
+        self._vrestore_count[queue] += 1
+        if (self._vrestore_count[queue] - 1) % interval:
             return
         with self.channel.conn_or_acquire() as client:
             ceil = time() - self.visibility_timeout
 
+            unacked_mutex_key = self.unacked_mutex_key.format(queue=queue)
+            unacked_index_key = self.unacked_index_key.format(queue=queue)
+
             try:
                 with Mutex(
                     client,
-                    self.unacked_mutex_key,
+                    unacked_mutex_key,
                     self.unacked_mutex_expire,
                 ):
                     visible = client.zrevrangebyscore(
-                        self.unacked_index_key,
+                        unacked_index_key,
                         ceil,
                         0,
                         start=num and start,
@@ -65,9 +120,21 @@ class QoS(RedisQoS):
                     )
 
                     for tag, score in visible or []:
-                        self.restore_by_tag(tag, client)
+                        self.restore_by_tag(tag, client, queue=queue)
             except MutexHeld:
                 pass
+
+    def restore_by_tag(self, tag, client=None, leftmost=False, queue=''):
+        unacked_key = self.unacked_key.format(queue=queue)
+
+        with self.channel.conn_or_acquire(client) as client:
+            with client.pipeline() as pipe:
+                p, _, _ = self._remove_from_indices(
+                    tag, pipe.hget(unacked_key, tag), queue=queue).execute()
+            if p:
+                M, EX, RK = loads(bytes_to_str(p))  # json is unicode
+                self.channel._do_restore_message(M, EX, RK, client, leftmost)
+
 
 class RedisNodeConnection():
     def __init__(self, key):
@@ -100,7 +167,6 @@ class ClusterPoller(MultiChannelPoller):
             conn.client.close()
             conn.client = None
 
-
     def _register_BRPOP(self, channel):
         conns = self._get_conns_for_channel(channel)
 
@@ -111,6 +177,23 @@ class ClusterPoller(MultiChannelPoller):
                 self._register(*ident)
 
         channel._brpop_start()
+
+    def on_poll_init(self, poller):
+        self.poller = poller
+        for channel in self._channels:
+            for queue in channel.active_queues:
+                return channel.qos.restore_visible(
+                    num=channel.unacked_restore_limit,
+                    queue=queue,
+                )
+
+    def maybe_restore_messages(self):
+        for channel in self._channels:
+            for queue in channel.active_queues:
+                return channel.qos.restore_visible(
+                    num=channel.unacked_restore_limit,
+                    queue=queue,
+                )
 
     def _get_conns_for_channel(self, channel):
         result = []
@@ -168,12 +251,9 @@ class Channel(RedisChannel):
     QoS = QoS
     socket_keepalive = True
 
-    namespace = '{default}'
-    keyprefix_queue = '/{namespace}/_kombu/binding%s'
-    keyprefix_fanout = '/{namespace}/_kombu/fanout.'
-    unacked_key = '/{namespace}/_kombu/unacked'
-    unacked_index_key = '/{namespace}/_kombu/unacked_index'
-    unacked_mutex_key = '/{namespace}/_kombu/unacked_mutex'
+    unacked_key = '_kombu.unacked.{{{queue}}}'
+    unacked_index_key = '_kombu.unacked_index.{{{queue}}}'
+    unacked_mutex_key = '_kombu.unacked_mutex.{{{queue}}}'
 
     min_priority = 0
     max_priority = 0
@@ -186,23 +266,25 @@ class Channel(RedisChannel):
     )
 
     def __init__(self, conn, *args, **kwargs):
-        options = conn.client.transport_options
-        namespace = options.get('namespace', self.namespace)
-        keys = [
-            'keyprefix_queue',
-            'keyprefix_fanout',
-            'unacked_key',
-            'unacked_index_key',
-            'unacked_mutex_key',
-        ]
-
         super().__init__(conn, *args, **kwargs)
 
-        for key in keys:
-            value = options.get(key, getattr(self, key))
-            setattr(self, key, value.format(namespace=namespace))
-
         self.client.info()
+
+    def _restore(self, message, leftmost=False):
+        if not self.ack_emulation:
+            return super(Channel, self)._restore(message)
+        tag = message.delivery_tag
+        routing_key = message.delivery_info['routing_key']
+        unacked_key = self.unacked_key.format(queue=routing_key)
+
+        with self.conn_or_acquire() as client:
+            with client.pipeline() as pipe:
+                P, _ = pipe.hget(unacked_key, tag) \
+                           .hdel(unacked_key, tag) \
+                           .execute()
+            if P:
+                M, EX, RK = loads(bytes_to_str(P))  # json is unicode
+                self._do_restore_message(M, EX, RK, client, leftmost)
 
     @contextmanager
     def conn_or_acquire(self, client=None):
