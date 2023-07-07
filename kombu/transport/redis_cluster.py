@@ -150,6 +150,7 @@ class RedisNodeConnection():
         self.client = None
         self.in_poll = False
         self.key = key
+        self.timeout = None
 
 class ClusterPoller(MultiChannelPoller):
 
@@ -311,6 +312,7 @@ class Channel(RedisChannel):
             for _, _, conn, _ in self.connection.cycle._chan_to_sock:
                 if conn.key == key and conn.in_poll == False:
                     conn.in_poll = True
+                    conn.timeout = timeout
                     conn.client.connection.send_command('BRPOP', key, timeout)
                     break
 
@@ -323,7 +325,7 @@ class Channel(RedisChannel):
             raise Empty()
         except MovedError:
             raise Empty()
-        conn.client.connection.send_command('BRPOP', conn.key, 1) # schedule next BRPOP
+        conn.client.connection.send_command('BRPOP', conn.key, conn.timeout) # schedule next BRPOP
 
         if resp:
             self.deliver_response(resp)
