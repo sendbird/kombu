@@ -19,7 +19,7 @@ from .redis import (
 
 try:
     import redis
-    from redis.exceptions import MovedError, RedisClusterException
+    from redis.exceptions import MovedError, RedisClusterException, SlotNotCoveredError, AskError, TryAgainError, ClusterDownError, ConnectionError, TimeoutError
 except ImportError:
     redis = None
 
@@ -347,23 +347,32 @@ class Channel(RedisChannel):
     def parse_response(self, conn, cmd, **options):
         try:
             return conn.client.parse_response(conn.client.connection, cmd, **options)
-        except self.connection_errors:
-            self.connection.cycle._unregister((self, self.client, conn, cmd))
-
-            raise
-        except MovedError as e:
-            # Copied from redis-py cluster.py
-            self.client.reinitialize_counter += 1
-            if self.client._should_reinitialized():
-                self.client.nodes_manager.initialize()
-                # Reset the counter
-                self.client.reinitialize_counter = 0
-            else:
-                self.client.nodes_manager.update_moved_exception(e)
-            self.connection.cycle._unregister((self, self.client, conn, cmd))
-
-            raise
         except Exception as e:
+            # Copied from https://github.com/sendbird/redis-py/blob/master/redis/cluster.py#L1173
+            if e is ConnectionError or e is TimeoutError:
+                self.client.nodes_manager.startup_nodes.pop(target_node.name, None)
+                self.client.nodes_manager.initialize()
+            elif e is MovedError:
+                self.client.reinitialize_counter += 1
+                if self.client._should_reinitialized():
+                    self.client.nodes_manager.initialize()
+                    self.client.reinitialize_counter = 0
+                else:
+                    self.client.nodes_manager.update_moved_exception(e)
+            elif e is SlotNotCoveredError:
+                self.client.reinitialize_counter += 1
+                if self.client._should_reinitialized():
+                    self.client.nodes_manager.initialize()
+                    self.client.reinitialize_counter = 0
+            elif e is TryAgainError:
+                time.sleep(0.05)
+                return  # try again in next BRPOP
+            elif e is AskError:
+                pass  # We should connect to other node
+            elif e is ClusterDownError:
+                time.sleep(0.25)
+                self.client.nodes_manager.initialize()
+
             self.connection.cycle._unregister((self, self.client, conn, cmd))
             raise
 
