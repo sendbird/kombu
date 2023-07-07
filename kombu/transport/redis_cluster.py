@@ -318,12 +318,37 @@ class Channel(RedisChannel):
         conn = options.pop('conn')
 
         try:
-            resp = conn.client.parse_response(conn.client.connection, 'BRPOP', **options)
-
-            conn.client.connection.send_command('BRPOP', conn.key, 1) # schedule next BRPOP
+            resp = self.parse_response(conn, 'BRPOP', **options)
         except self.connection_errors:
-            self.connection.cycle._unregister((self, self.client, conn, 'BRPOP'))
             raise Empty()
+        except MovedError:
+            raise Empty()
+        conn.client.connection.send_command('BRPOP', conn.key, 1) # schedule next BRPOP
+
+        if resp:
+            self.deliver_response(resp)
+            return True
+
+    def _poll_error(self, cmd, conn, **options):
+        resp = self.parse_response(conn, 'BRPOP', **options)
+        if resp:
+            self.deliver_response(resp)
+
+        self.connection.cycle._unregister((self, self.client, conn, 'BRPOP'))
+
+    def deliver_response(self, resp):
+        dest, item = resp
+        dest = bytes_to_str(dest).rsplit(self.sep, 1)[0]
+        self._queue_cycle.rotate(dest)
+        self.connection._deliver(loads(bytes_to_str(item)), dest)
+
+    def parse_response(self, conn, cmd, **options):
+        try:
+            return conn.client.parse_response(conn.client.connection, cmd, **options)
+        except self.connection_errors:
+            self.connection.cycle._unregister((self, self.client, conn, cmd))
+
+            raise
         except MovedError as e:
             # Copied from redis-py cluster.py
             self.client.reinitialize_counter += 1
@@ -333,21 +358,12 @@ class Channel(RedisChannel):
                 self.client.reinitialize_counter = 0
             else:
                 self.client.nodes_manager.update_moved_exception(e)
-            self.connection.cycle._unregister((self, self.client, conn, 'BRPOP'))
-            raise Empty()
-        except Exception as e:
-            self.connection.cycle._unregister((self, self.client, conn, 'BRPOP'))
+            self.connection.cycle._unregister((self, self.client, conn, cmd))
+
             raise
-
-        if resp:
-            dest, item = resp
-            dest = bytes_to_str(dest).rsplit(self.sep, 1)[0]
-            self._queue_cycle.rotate(dest)
-            self.connection._deliver(loads(bytes_to_str(item)), dest)
-            return True
-
-    def _poll_error(self, cmd, conn, **options):
-        self.connection.cycle._unregister((self, self.client, conn, 'BRPOP'))
+        except Exception as e:
+            self.connection.cycle._unregister((self, self.client, conn, cmd))
+            raise
 
 
 class Transport(RedisTransport):
