@@ -170,6 +170,10 @@ class ClusterPoller(MultiChannelPoller):
 
     def _unregister(self, channel, client, conn, cmd):
         sock = self._chan_to_sock[(channel, client, conn, cmd)]
+
+        del self._fd_to_chan[sock.fileno()]
+        del self._chan_to_sock[(channel, client, conn, cmd)]
+
         self.poller.unregister(sock)
 
         if conn.client:
@@ -318,8 +322,7 @@ class Channel(RedisChannel):
 
             conn.client.connection.send_command('BRPOP', conn.key, 1) # schedule next BRPOP
         except self.connection_errors:
-            conn.client.close()
-            conn.client = None
+            self.connection.cycle._unregister((self, self.client, conn, 'BRPOP'))
             raise Empty()
         except MovedError as e:
             # Copied from redis-py cluster.py
@@ -330,7 +333,11 @@ class Channel(RedisChannel):
                 self.client.reinitialize_counter = 0
             else:
                 self.client.nodes_manager.update_moved_exception(e)
+            self.connection.cycle._unregister((self, self.client, conn, 'BRPOP'))
             raise Empty()
+        except Exception as e:
+            self.connection.cycle._unregister((self, self.client, conn, 'BRPOP'))
+            raise
 
         if resp:
             dest, item = resp
@@ -340,8 +347,7 @@ class Channel(RedisChannel):
             return True
 
     def _poll_error(self, cmd, conn, **options):
-        if cmd == 'BRPOP':
-            conn.client.parse_response(conn.client.connection, cmd, **options)
+        self.connection.cycle._unregister((self, self.client, conn, 'BRPOP'))
 
 
 class Transport(RedisTransport):
