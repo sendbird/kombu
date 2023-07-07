@@ -46,6 +46,7 @@ TRANSPORT_ALIASES = {
     'pyro': 'kombu.transport.pyro:Transport',
     'gcpubsub': 'kombu.transport.gcpubsub:Transport',
     'redis-cluster': 'kombu.transport.redis_cluster:Transport',
+    'redis-clusters': 'kombu.transport.redis_cluster:Transport',
 }
 
 _transport_cache = {}
