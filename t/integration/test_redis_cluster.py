@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import os
-import socket
-from time import sleep
 
 import pytest
 import redis
+
+from case import patch, MagicMock
 
 import kombu
 from kombu.transport.redis_cluster import Transport
@@ -37,6 +37,19 @@ def connection():
 @pytest.fixture()
 def invalid_connection():
     return kombu.Connection('redis-cluster://localhost:12345')
+
+
+def test_ssl_connection():
+    def patched_init(self, **kwargs):
+        assert kwargs['password'] == 'test_password'
+        assert kwargs['host'] == 'localhost'
+        assert kwargs['port'] == 7000
+        assert kwargs['ssl'] is True
+
+    with patch('redis.RedisCluster.__init__', patched_init):
+        with patch('redis.RedisCluster.execute_command'):
+            conn = kombu.Connection('redis-clusters://:test_password@localhost:7000')
+            conn.default_channel
 
 
 @pytest.mark.env('redis-cluster')
