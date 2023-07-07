@@ -23,6 +23,8 @@ try:
 except ImportError:
     redis = None
 
+RedisCluster = redis.RedisCluster
+
 
 # copied from `kombu.transport.redis` and disable pipeline transcation
 @contextmanager
@@ -237,7 +239,7 @@ class RedisClusterConnection():
     def create_connection(cls, host, port):
         params = {'skip_full_coverage_check': True, 'host': host, 'port': port}
 
-        return redis.RedisCluster(**params)
+        return RedisCluster(**params)
 
     @classmethod
     def close(cls):
