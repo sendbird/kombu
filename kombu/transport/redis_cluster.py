@@ -365,12 +365,10 @@ class Channel(RedisChannel):
                     self.client.nodes_manager.initialize()
                     self.client.reinitialize_counter = 0
             elif e is TryAgainError:
-                time.sleep(0.05)
                 return  # try again in next BRPOP
             elif e is AskError:
                 pass  # We should connect to other node
             elif e is ClusterDownError:
-                time.sleep(0.25)
                 self.client.nodes_manager.initialize()
 
             self.connection.cycle._unregister((self, self.client, conn, cmd))
