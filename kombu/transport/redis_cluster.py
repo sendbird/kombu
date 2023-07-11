@@ -360,7 +360,7 @@ class Channel(RedisChannel):
         try:
             return conn.client.parse_response(conn.client.connection, cmd, **options)
         except Exception as e:
-            logger.warning('Error while reading from Redis: %r', e)
+            logger.warning('Error while reading from Redis', extra={"e": e, "key": conn.key})
             # Mostly copied from https://github.com/sendbird/redis-py/blob/master/redis/cluster.py#L1173
             if isinstance(e, ConnectionError) or isinstance(e, TimeoutError):
                 self.client.nodes_manager.startup_nodes.pop(target_node.name, None)
