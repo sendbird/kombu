@@ -3,6 +3,7 @@ from time import time
 from queue import Empty
 from collections import defaultdict
 
+from kombu.log import get_logger
 from kombu.utils.encoding import bytes_to_str
 from kombu.utils.eventio import READ, ERR
 from kombu.utils.json import loads, dumps
@@ -22,6 +23,8 @@ try:
     from redis.exceptions import MovedError, RedisClusterException, SlotNotCoveredError, AskError, TryAgainError, ClusterDownError, ConnectionError, TimeoutError
 except ImportError:
     redis = None
+
+logger = get_logger(__name__)
 
 
 # Override this method to use other redis client
@@ -261,6 +264,7 @@ class Channel(RedisChannel):
         super().__init__(conn, *args, **kwargs)
 
         self.client.info()
+        self.ask_errors = {}
 
     def _restore(self, message, leftmost=False):
         if not self.ack_emulation:
@@ -313,6 +317,9 @@ class Channel(RedisChannel):
                 if conn.key == key and conn.in_poll == False:
                     conn.in_poll = True
                     conn.timeout = timeout
+                    if conn.key in self.ask_errors:
+                        del self.ask_errors[conn.key]
+                        conn.client.execute_command('ASKING')
                     conn.client.connection.send_command('BRPOP', key, timeout)
                     break
 
@@ -348,7 +355,8 @@ class Channel(RedisChannel):
         try:
             return conn.client.parse_response(conn.client.connection, cmd, **options)
         except Exception as e:
-            # Copied from https://github.com/sendbird/redis-py/blob/master/redis/cluster.py#L1173
+            logger.warning('Error while reading from Redis: %r', e.__dict__)
+            # Mostly copied from https://github.com/sendbird/redis-py/blob/master/redis/cluster.py#L1173
             if e is ConnectionError or e is TimeoutError:
                 self.client.nodes_manager.startup_nodes.pop(target_node.name, None)
                 self.client.nodes_manager.initialize()
@@ -367,12 +375,15 @@ class Channel(RedisChannel):
             elif e is TryAgainError:
                 return  # try again in next BRPOP
             elif e is AskError:
-                pass  # We should connect to other node
+                self.add_ask_error(e, conn)
             elif e is ClusterDownError:
                 self.client.nodes_manager.initialize()
 
             self.connection.cycle._unregister((self, self.client, conn, cmd))
             raise
+
+    def add_ask_error(self, e, conn):
+        self.ask_errors[conn.key] = e
 
 
 class Transport(RedisTransport):
