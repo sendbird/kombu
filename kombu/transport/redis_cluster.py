@@ -319,7 +319,11 @@ class Channel(RedisChannel):
                     conn.timeout = timeout
                     if conn.key in self.ask_errors:
                         del self.ask_errors[conn.key]
-                        conn.client.execute_command('ASKING')
+                        try:
+                            conn.client.execute_command('ASKING')
+                        except Exception as e:
+                            logger.warning('Error while sending ASKING', extra={"e": e, "key": conn.key})
+                            continue
 
                     conn.client.connection.send_command('BRPOP', key, timeout)
                     break
