@@ -48,7 +48,7 @@ def test_ssl_connection():
 
     with patch('redis.RedisCluster.__init__', patched_init):
         with patch('redis.RedisCluster.execute_command'):
-            conn = kombu.Connection('redis-clusters://:test_password@localhost:7000')
+            conn = kombu.Connection('rediss-cluster://:test_password@localhost:7000')
             conn.default_channel
 
 
