@@ -25,8 +25,10 @@ except ImportError:
 
 
 # Override this method to use other redis client
-def create_redis_cluster_connection(host, port):
-    params = {'skip_full_coverage_check': True, 'host': host, 'port': port}
+def create_redis_cluster_connection(hostname, port, password, ssl):
+    params = {'skip_full_coverage_check': True, 'host': hostname, 'port': port, 'password': password}
+    if ssl:
+        params['ssl'] = True
 
     return redis.RedisCluster(**params)
 
@@ -231,7 +233,6 @@ class ClusterPoller(MultiChannelPoller):
         if chan.qos.can_consume():
             return chan.handlers[cmd](**{'conn': conn})
 
-
 class Channel(RedisChannel):
 
     QoS = QoS
@@ -282,7 +283,13 @@ class Channel(RedisChannel):
     def _create_client(self, asynchronous=False):
         conninfo = self.connection.client
 
-        return create_redis_cluster_connection(conninfo.hostname, conninfo.port)
+        hostname = conninfo.hostname
+        port = conninfo.port
+        password = conninfo.password
+        transport = self.connection.client.transport_cls
+        ssl = transport == 'rediss-cluster'
+
+        return create_redis_cluster_connection(hostname, port, password, ssl)
 
     def close(self):
         super().close()
