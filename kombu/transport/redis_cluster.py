@@ -24,6 +24,13 @@ except ImportError:
     redis = None
 
 
+# Override this method to use other redis client
+def create_redis_cluster_connection(host, port):
+    params = {'skip_full_coverage_check': True, 'host': host, 'port': port}
+
+    return redis.RedisCluster(**params)
+
+
 # copied from `kombu.transport.redis` and disable pipeline transcation
 @contextmanager
 def Mutex(client, name, expire):
@@ -224,27 +231,6 @@ class ClusterPoller(MultiChannelPoller):
         if chan.qos.can_consume():
             return chan.handlers[cmd](**{'conn': conn})
 
-class RedisClusterConnection():
-    connections = {}
-    @classmethod
-    def get_connection(cls, host, port):
-        key = (host, port)
-        if key not in cls.connections:
-            cls.connections[key] = cls.create_connection(host, port)
-        return cls.connections[key]
-
-    @classmethod
-    def create_connection(cls, host, port):
-        params = {'skip_full_coverage_check': True, 'host': host, 'port': port}
-
-        return redis.RedisCluster(**params)
-
-    @classmethod
-    def close(cls):
-        for conn in cls.connections.values():
-            conn.close()
-        cls.connections = {}
-
 
 class Channel(RedisChannel):
 
@@ -296,7 +282,12 @@ class Channel(RedisChannel):
     def _create_client(self, asynchronous=False):
         conninfo = self.connection.client
 
-        return RedisClusterConnection.get_connection(conninfo.hostname, conninfo.port)
+        return create_redis_cluster_connection(conninfo.hostname, conninfo.port)
+
+    def close(self):
+        super().close()
+
+        self.client.close()
 
     def _brpop_start(self, timeout=1):
         queues = self._queue_cycle.consume(len(self.active_queues))
@@ -367,8 +358,3 @@ class Transport(RedisTransport):
 
     def driver_version(self):
         return redis.__version__
-
-    def close_connection(self, connection):
-        super().close_connection(connection)
-
-        RedisClusterConnection.close()
