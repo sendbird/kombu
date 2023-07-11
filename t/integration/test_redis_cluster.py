@@ -5,7 +5,9 @@ import os
 import pytest
 import redis
 
-from case import patch, MagicMock
+from case import patch
+
+from redis.exceptions import MovedError, AskError
 
 import kombu
 from kombu.transport.redis_cluster import Transport
@@ -50,6 +52,45 @@ def test_ssl_connection():
         with patch('redis.RedisCluster.execute_command'):
             conn = kombu.Connection('rediss-cluster://:test_password@localhost:7000')
             conn.default_channel
+
+def test_movederror(connection):
+    with connection as conn:
+        queue = conn.SimpleQueue('test_movederror')
+        queue.put({'Hello': 'World'}, headers={'k1': 'v1'})
+
+        def parse_response(*args, **kwargs):
+            slot = 123
+            r_host = 'nosuchhost'
+            r_port = 7001
+
+            raise MovedError(f"{slot} {r_host}:{r_port}")
+
+        with patch('redis.Redis.parse_response', parse_response):
+            try:
+                message = queue.get(timeout=1)
+            except Exception as e:
+                pass
+            assert conn.default_channel.client.reinitialize_counter != 0
+
+
+def test_askerror(connection):
+    with connection as conn:
+        queue = conn.SimpleQueue('test_askerror')
+        queue.put({'Hello': 'World'}, headers={'k1': 'v1'})
+
+        def parse_response(*args, **kwargs):
+            slot = 123
+            r_host = 'nosuchhost'
+            r_port = 7001
+
+            raise AskError(f"{slot} {r_host}:{r_port}")
+
+        with patch('redis.Redis.parse_response', parse_response):
+            try:
+                message = queue.get(timeout=1)
+            except Exception as e:
+                pass
+            assert conn.default_channel.ask_errors.get('test_askerror') is not None
 
 
 @pytest.mark.env('redis-cluster')
