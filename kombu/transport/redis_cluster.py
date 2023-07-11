@@ -287,7 +287,7 @@ class Channel(RedisChannel):
         port = conninfo.port
         password = conninfo.password
         transport = self.connection.client.transport_cls
-        ssl = transport == 'redis-clusters'
+        ssl = transport == 'rediss-cluster'
 
         return create_redis_cluster_connection(hostname, port, password, ssl)
 
