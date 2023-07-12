@@ -7,7 +7,6 @@ from kombu.log import get_logger
 from kombu.utils.encoding import bytes_to_str
 from kombu.utils.eventio import READ, ERR
 from kombu.utils.json import loads, dumps
-from kombu.utils.uuid import uuid
 
 from . import virtual
 from .redis import (
@@ -16,6 +15,7 @@ from .redis import (
     MutexHeld,
     QoS as RedisQoS,
     Transport as RedisTransport,
+    Mutex
 )
 
 try:
@@ -34,23 +34,6 @@ def create_redis_cluster_connection(hostname, port, password, ssl):
         params['ssl'] = True
 
     return redis.RedisCluster(**params)
-
-
-# copied from `kombu.transport.redis` and disable pipeline transcation
-@contextmanager
-def Mutex(client, name, expire):
-    lock_id = uuid().encode('utf-8')
-    acquired = client.set(name, lock_id, ex=expire, nx=True)
-
-    try:
-        if acquired:
-            yield
-        else:
-            raise MutexHeld()
-    finally:
-        if acquired:
-            if client.get(name) == lock_id:
-                client.delete(name)
 
 
 class QoS(RedisQoS):
