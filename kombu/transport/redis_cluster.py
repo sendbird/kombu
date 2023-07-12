@@ -147,7 +147,11 @@ class ClusterPoller(MultiChannelPoller):
             self._unregister(*ident)
 
         if not conn.client:
-            node = channel.client.nodes_manager.get_node_from_slot(channel.client.keyslot(conn.key))
+            if conn.key in channel.ask_errors:
+                ask_error = channel.ask_errors[conn.key]
+                node = channel.client.nodes_manager.get_node(ask_error.host, ask_error.port)
+            else:
+                node = channel.client.nodes_manager.get_node_from_slot(channel.client.keyslot(conn.key))
             conn.client = node.redis_connection.client()
 
         sock = conn.client.connection._sock
