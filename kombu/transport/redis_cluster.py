@@ -149,10 +149,12 @@ class ClusterPoller(MultiChannelPoller):
         if not conn.client:
             if conn.key in channel.ask_errors:
                 ask_error = channel.ask_errors[conn.key]
-                node = channel.client.nodes_manager.get_node(ask_error.host, ask_error.port)
+                node = channel.client.get_node(ask_error.host, ask_error.port)
             else:
-                node = channel.client.nodes_manager.get_node_from_slot(channel.client.keyslot(conn.key))
-            conn.client = node.redis_connection.client()
+                node = channel.client.get_node_from_key(conn.key)
+
+            redis_connection = channel.client.get_redis_connection(node)
+            conn.client = redis_connection.client()
 
         sock = conn.client.connection._sock
         self._fd_to_chan[sock.fileno()] = (channel, conn, cmd)
