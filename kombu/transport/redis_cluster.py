@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from time import time
+from time import time, sleep
 from queue import Empty
 from collections import defaultdict
 
@@ -148,6 +148,7 @@ class ClusterPoller(MultiChannelPoller):
 
         if not conn.client:
             tries = 0
+            backoff = [0, 0.1, 0.2, 0.4]
             while True:
                 if tries > 3:
                     raise ValueError('Cannot find node for key: {}'.format(conn.key))
@@ -159,6 +160,7 @@ class ClusterPoller(MultiChannelPoller):
                 if node:
                     break
 
+                sleep(backoff[tries])
                 channel.client.nodes_manager.initialize()
                 tries += 1
 
