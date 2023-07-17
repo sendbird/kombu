@@ -147,11 +147,20 @@ class ClusterPoller(MultiChannelPoller):
             self._unregister(*ident)
 
         if not conn.client:
-            if conn.key in channel.ask_errors:
-                ask_error = channel.ask_errors[conn.key]
-                node = channel.client.get_node(ask_error.host, ask_error.port)
-            else:
-                node = channel.client.get_node_from_key(conn.key)
+            tries = 0
+            while True:
+                if tries > 3:
+                    raise ValueError('Cannot find node for key: {}'.format(conn.key))
+                if conn.key in channel.ask_errors:
+                    ask_error = channel.ask_errors[conn.key]
+                    node = channel.client.get_node(ask_error.host, ask_error.port)
+                else:
+                    node = channel.client.get_node_from_key(conn.key)
+                if node:
+                    break
+
+                channel.client.nodes_manager.initialize()
+                tries += 1
 
             redis_connection = channel.client.get_redis_connection(node)
             conn.client = redis_connection.client()
@@ -180,7 +189,10 @@ class ClusterPoller(MultiChannelPoller):
             ident = (channel, channel.client, conn, 'BRPOP')
 
             if (ident not in self._chan_to_sock):
-                self._register(*ident)
+                try:
+                    self._register(*ident)
+                except Exception as e:
+                    logger.warning('Error while registering BRPOP', extra={"e": e, "key": conn.key})
 
         channel._brpop_start()
 
