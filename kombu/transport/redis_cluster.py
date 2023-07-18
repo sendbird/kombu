@@ -152,13 +152,16 @@ class ClusterPoller(MultiChannelPoller):
             while True:
                 if tries > 3:
                     raise ValueError('Cannot find node for key: {}'.format(conn.key))
-                if conn.key in channel.ask_errors:
-                    ask_error = channel.ask_errors[conn.key]
-                    node = channel.client.get_node(ask_error.host, ask_error.port)
-                else:
-                    node = channel.client.get_node_from_key(conn.key)
-                if node:
-                    break
+                try:
+                    if conn.key in channel.ask_errors:
+                        ask_error = channel.ask_errors[conn.key]
+                        node = channel.client.get_node(ask_error.host, ask_error.port)
+                    else:
+                        node = channel.client.get_node_from_key(conn.key)
+                    if node:
+                        break
+                except Exception as e:
+                    logger.warning('Error while getting node from key', extra={"e": e, "key": conn.key})
 
                 sleep(backoff[tries])
                 channel.client.nodes_manager.initialize()
