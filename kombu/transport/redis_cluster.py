@@ -161,7 +161,7 @@ class ClusterPoller(MultiChannelPoller):
                     if node:
                         break
                 except Exception as e:
-                    logger.warning('Error while getting node from key', extra={"e": e, "key": conn.key})
+                    logger.error('Error while getting node from key', extra={"e": e, "key": conn.key})
 
                 sleep(backoff[tries])
                 channel.client.nodes_manager.initialize()
@@ -197,7 +197,7 @@ class ClusterPoller(MultiChannelPoller):
                 try:
                     self._register(*ident)
                 except Exception as e:
-                    logger.warning('Error while registering BRPOP', extra={"e": e, "key": conn.key})
+                    logger.error('Error while registering BRPOP', extra={"e": e, "key": conn.key})
 
         channel._brpop_start()
 
