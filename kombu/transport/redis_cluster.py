@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from time import time
+from time import time, sleep
 from queue import Empty
 from collections import defaultdict
 
@@ -147,12 +147,28 @@ class ClusterPoller(MultiChannelPoller):
             self._unregister(*ident)
 
         if not conn.client:
-            if conn.key in channel.ask_errors:
-                ask_error = channel.ask_errors[conn.key]
-                node = channel.client.nodes_manager.get_node(ask_error.host, ask_error.port)
-            else:
-                node = channel.client.nodes_manager.get_node_from_slot(channel.client.keyslot(conn.key))
-            conn.client = node.redis_connection.client()
+            tries = 0
+            backoff = [0, 0.1, 0.2, 0.4]
+            while True:
+                if tries > 3:
+                    raise ValueError('Cannot find node for key: {}'.format(conn.key))
+                try:
+                    if conn.key in channel.ask_errors:
+                        ask_error = channel.ask_errors[conn.key]
+                        node = channel.client.get_node(ask_error.host, ask_error.port)
+                    else:
+                        node = channel.client.get_node_from_key(conn.key)
+                    if node:
+                        break
+                except Exception as e:
+                    logger.error('Error while getting node from key', extra={"e": e, "key": conn.key})
+
+                sleep(backoff[tries])
+                channel.client.nodes_manager.initialize()
+                tries += 1
+
+            redis_connection = channel.client.get_redis_connection(node)
+            conn.client = redis_connection.client()
 
         sock = conn.client.connection._sock
         self._fd_to_chan[sock.fileno()] = (channel, conn, cmd)
@@ -178,7 +194,10 @@ class ClusterPoller(MultiChannelPoller):
             ident = (channel, channel.client, conn, 'BRPOP')
 
             if (ident not in self._chan_to_sock):
-                self._register(*ident)
+                try:
+                    self._register(*ident)
+                except Exception as e:
+                    logger.error('Error while registering BRPOP', extra={"e": e, "key": conn.key})
 
         channel._brpop_start()
 
