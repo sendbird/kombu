@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import queue
 
 import pytest
 import redis
@@ -52,6 +53,26 @@ def test_ssl_connection():
         with patch('redis.RedisCluster.execute_command'):
             conn = kombu.Connection('rediss-cluster://:test_password@localhost:7000')
             conn.default_channel
+
+def test_connectionerror(connection):
+    with connection as conn:
+        queue = conn.SimpleQueue('test_connectionerror')
+        queue.put({'Hello': 'World'}, headers={'k1': 'v1'})
+
+        original_parse_response = redis.Redis.parse_response
+        def parse_response(*args, **kwargs):
+            if args[2] == 'BRPOP':
+                raise redis.exceptions.ConnectionError()
+            else:
+                return original_parse_response(*args)
+
+        with patch('redis.Redis.parse_response', parse_response):
+            try:
+                _ = queue.get(timeout=1)
+            except queue.Empty:
+                pass
+            except:
+                raise
 
 def test_movederror(connection):
     with connection as conn:
