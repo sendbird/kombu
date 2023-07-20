@@ -353,6 +353,7 @@ class Channel(RedisChannel):
             if resp:
                 self.deliver_response(resp)
         except self.connection_errors as e:
+            # We should not throw error on this method to make kombu to continue operation
             logger.error('Error while reading from Redis', extra={"e": e, "key": conn.key})
 
         self.connection.cycle._unregister(self, self.client, conn, 'BRPOP')
