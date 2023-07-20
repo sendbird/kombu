@@ -352,8 +352,8 @@ class Channel(RedisChannel):
             resp = self.parse_response(conn, 'BRPOP', **options)
             if resp:
                 self.deliver_response(resp)
-        except self.connection_errors:
-            pass
+        except self.connection_errors as e:
+            logger.error('Error while reading from Redis', extra={"e": e, "key": conn.key})
 
         self.connection.cycle._unregister(self, self.client, conn, 'BRPOP')
 
