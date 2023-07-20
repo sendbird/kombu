@@ -82,6 +82,8 @@ class QoS(RedisQoS):
         self.ack(delivery_tag)
 
     def _remove_from_indices(self, delivery_tag, pipe=None, queue=''):
+        assert queue
+
         unacked_index_key = self.unacked_index_key.format(queue=queue)
         unacked_key = self.unacked_key.format(queue=queue)
 
@@ -90,6 +92,8 @@ class QoS(RedisQoS):
                        .hdel(unacked_key, delivery_tag)
 
     def restore_visible(self, start=0, num=10, interval=100, queue=''):
+        assert queue
+
         self._vrestore_count[queue] += 1
         if (self._vrestore_count[queue] - 1) % interval:
             return
@@ -120,6 +124,8 @@ class QoS(RedisQoS):
                 pass
 
     def restore_by_tag(self, tag, client=None, leftmost=False, queue=''):
+        assert queue
+
         unacked_key = self.unacked_key.format(queue=queue)
 
         with self.channel.conn_or_acquire(client) as client:
