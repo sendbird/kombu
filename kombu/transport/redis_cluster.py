@@ -366,10 +366,14 @@ class Channel(RedisChannel):
         try:
             return conn.client.parse_response(conn.client.connection, cmd, **options)
         except Exception as e:
-            logger.warning('Error while reading from Redis', extra={"e": e, "key": conn.key})
+            logger.error('Error while reading from Redis', extra={"e": e, "key": conn.key})
             # Mostly copied from https://github.com/sendbird/redis-py/blob/master/redis/cluster.py#L1173
             if isinstance(e, ConnectionError) or isinstance(e, TimeoutError):
-                self.client.nodes_manager.startup_nodes.pop(target_node.name, None)
+                try:
+                    node = channel.client.get_node_from_key(conn.key)
+                    self.client.nodes_manager.startup_nodes.pop(node.name, None)
+                except Exception as e:
+                    logger.error('Error while removing node', extra={"e": e, "key": conn.key})
                 self.client.nodes_manager.initialize()
             elif isinstance(e, MovedError):
                 self.client.reinitialize_counter += 1
