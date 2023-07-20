@@ -341,7 +341,7 @@ class Channel(RedisChannel):
             resp = self.parse_response(conn, 'BRPOP', **options)
         except self.connection_errors:
             raise Empty()
-        except MovedError:
+        except (ConnectionError, TimeoutError, MovedError, TryAgainError, ClusterDownError, SlotNotCoveredError, AskError):
             raise Empty()
         conn.client.connection.send_command('BRPOP', conn.key, conn.timeout) # schedule next BRPOP
 
@@ -350,9 +350,12 @@ class Channel(RedisChannel):
             return True
 
     def _poll_error(self, cmd, conn, **options):
-        resp = self.parse_response(conn, 'BRPOP', **options)
-        if resp:
-            self.deliver_response(resp)
+        try:
+            resp = self.parse_response(conn, 'BRPOP', **options)
+            if resp:
+                self.deliver_response(resp)
+        except (ConnectionError, TimeoutError, MovedError, TryAgainError, ClusterDownError, SlotNotCoveredError, AskError):
+            pass
 
         self.connection.cycle._unregister(self, self.client, conn, 'BRPOP')
 
