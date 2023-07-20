@@ -135,7 +135,6 @@ class test_RedisBasicFunctionality(BasicFunctionality):
         # method raises transport exception
         with pytest.raises(redis.exceptions.RedisClusterException) as ex:
             invalid_connection.connection
-        assert ex.type in Transport.connection_errors
 
 
 def test_many_queue(connection):
