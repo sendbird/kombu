@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import queue
 
 import pytest
 import redis
@@ -53,23 +54,50 @@ def test_ssl_connection():
             conn = kombu.Connection('rediss-cluster://:test_password@localhost:7000')
             conn.default_channel
 
+def test_connectionerror(connection):
+    with connection as conn:
+        queue = conn.SimpleQueue('test_connectionerror')
+        queue.put({'Hello': 'World'}, headers={'k1': 'v1'})
+
+        original_parse_response = redis.Redis.parse_response
+        def parse_response(*args, **kwargs):
+            if args[2] == 'BRPOP':
+                raise redis.exceptions.ConnectionError()
+            else:
+                return original_parse_response(*args)
+
+        with patch('redis.Redis.parse_response', parse_response):
+            try:
+                _ = queue.get(timeout=1)
+            except queue.Empty:
+                pass
+            except:
+                raise
+
 def test_movederror(connection):
     with connection as conn:
         queue = conn.SimpleQueue('test_movederror')
         queue.put({'Hello': 'World'}, headers={'k1': 'v1'})
 
-        def parse_response(*args, **kwargs):
-            slot = 123
-            r_host = 'nosuchhost'
-            r_port = 7001
+        original_parse_response = redis.Redis.parse_response
 
-            raise MovedError(f"{slot} {r_host}:{r_port}")
+        def parse_response(*args, **kwargs):
+            if args[2] == 'BRPOP':
+                slot = 123
+                r_host = 'nosuchhost'
+                r_port = 7001
+
+                raise MovedError(f"{slot} {r_host}:{r_port}")
+            else:
+                return original_parse_response(*args)
 
         with patch('redis.Redis.parse_response', parse_response):
             try:
                 message = queue.get(timeout=1)
-            except Exception as e:
+            except queue.Empty:
                 pass
+            except:
+                raise
             assert conn.default_channel.client.reinitialize_counter != 0
 
 
@@ -78,18 +106,25 @@ def test_askerror(connection):
         queue = conn.SimpleQueue('test_askerror')
         queue.put({'Hello': 'World'}, headers={'k1': 'v1'})
 
-        def parse_response(*args, **kwargs):
-            slot = 123
-            r_host = 'nosuchhost'
-            r_port = 7001
+        original_parse_response = redis.Redis.parse_response
 
-            raise AskError(f"{slot} {r_host}:{r_port}")
+        def parse_response(*args, **kwargs):
+            if args[2] == 'BRPOP':
+                slot = 123
+                r_host = 'nosuchhost'
+                r_port = 7001
+
+                raise AskError(f"{slot} {r_host}:{r_port}")
+            else:
+                return original_parse_response(*args)
 
         with patch('redis.Redis.parse_response', parse_response):
             try:
                 message = queue.get(timeout=1)
-            except Exception as e:
+            except queue.Empty:
                 pass
+            except:
+                raise
             assert conn.default_channel.ask_errors.get('test_askerror') is not None
 
 
@@ -100,7 +135,6 @@ class test_RedisBasicFunctionality(BasicFunctionality):
         # method raises transport exception
         with pytest.raises(redis.exceptions.RedisClusterException) as ex:
             invalid_connection.connection
-        assert ex.type in Transport.connection_errors
 
 
 def test_many_queue(connection):

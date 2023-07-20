@@ -341,8 +341,6 @@ class Channel(RedisChannel):
             resp = self.parse_response(conn, 'BRPOP', **options)
         except self.connection_errors:
             raise Empty()
-        except MovedError:
-            raise Empty()
         conn.client.connection.send_command('BRPOP', conn.key, conn.timeout) # schedule next BRPOP
 
         if resp:
@@ -350,9 +348,13 @@ class Channel(RedisChannel):
             return True
 
     def _poll_error(self, cmd, conn, **options):
-        resp = self.parse_response(conn, 'BRPOP', **options)
-        if resp:
-            self.deliver_response(resp)
+        try:
+            resp = self.parse_response(conn, 'BRPOP', **options)
+            if resp:
+                self.deliver_response(resp)
+        except self.connection_errors as e:
+            # We should not throw error on this method to make kombu to continue operation
+            logger.error('Error while reading from Redis', extra={"e": e, "key": conn.key})
 
         self.connection.cycle._unregister(self, self.client, conn, 'BRPOP')
 
@@ -366,10 +368,14 @@ class Channel(RedisChannel):
         try:
             return conn.client.parse_response(conn.client.connection, cmd, **options)
         except Exception as e:
-            logger.warning('Error while reading from Redis', extra={"e": e, "key": conn.key})
+            logger.error('Error while reading from Redis', extra={"e": e, "key": conn.key})
             # Mostly copied from https://github.com/sendbird/redis-py/blob/master/redis/cluster.py#L1173
             if isinstance(e, ConnectionError) or isinstance(e, TimeoutError):
-                self.client.nodes_manager.startup_nodes.pop(target_node.name, None)
+                try:
+                    node = channel.client.get_node_from_key(conn.key)
+                    self.client.nodes_manager.startup_nodes.pop(node.name, None)
+                except Exception as e:
+                    logger.error('Error while removing node', extra={"e": e, "key": conn.key})
                 self.client.nodes_manager.initialize()
             elif isinstance(e, MovedError):
                 self.client.reinitialize_counter += 1
@@ -403,7 +409,6 @@ class Transport(RedisTransport):
 
     driver_type = 'redis-cluster'
     driver_name = driver_type
-    connection_errors = RedisTransport.connection_errors + (RedisClusterException,)
 
     implements = virtual.Transport.implements.extend(
         asynchronous=True, exchange_type=frozenset(['direct'])
@@ -418,3 +423,10 @@ class Transport(RedisTransport):
 
     def driver_version(self):
         return redis.__version__
+
+    def _get_errors(self):
+        connection_errors, channel_errors = super()._get_errors()
+        connection_errors += (RedisClusterException, ConnectionError, TimeoutError, MovedError, TryAgainError, ClusterDownError, SlotNotCoveredError, AskError)
+
+        return connection_errors, channel_errors
+
