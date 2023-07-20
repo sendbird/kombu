@@ -341,8 +341,6 @@ class Channel(RedisChannel):
             resp = self.parse_response(conn, 'BRPOP', **options)
         except self.connection_errors:
             raise Empty()
-        except (ConnectionError, TimeoutError, MovedError, TryAgainError, ClusterDownError, SlotNotCoveredError, AskError):
-            raise Empty()
         conn.client.connection.send_command('BRPOP', conn.key, conn.timeout) # schedule next BRPOP
 
         if resp:
@@ -354,7 +352,7 @@ class Channel(RedisChannel):
             resp = self.parse_response(conn, 'BRPOP', **options)
             if resp:
                 self.deliver_response(resp)
-        except (ConnectionError, TimeoutError, MovedError, TryAgainError, ClusterDownError, SlotNotCoveredError, AskError):
+        except self.connection_errors:
             pass
 
         self.connection.cycle._unregister(self, self.client, conn, 'BRPOP')
@@ -410,7 +408,6 @@ class Transport(RedisTransport):
 
     driver_type = 'redis-cluster'
     driver_name = driver_type
-    connection_errors = RedisTransport.connection_errors + (RedisClusterException,)
 
     implements = virtual.Transport.implements.extend(
         asynchronous=True, exchange_type=frozenset(['direct'])
@@ -425,3 +422,10 @@ class Transport(RedisTransport):
 
     def driver_version(self):
         return redis.__version__
+
+    def _get_errors(self):
+        connection_errors, channel_errors = super()._get_errors()
+        connection_errors += (RedisClusterException, ConnectionError, TimeoutError, MovedError, TryAgainError, ClusterDownError, SlotNotCoveredError, AskError)
+
+        return connection_errors, channel_errors
+
