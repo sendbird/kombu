@@ -79,18 +79,25 @@ def test_movederror(connection):
         queue = conn.SimpleQueue('test_movederror')
         queue.put({'Hello': 'World'}, headers={'k1': 'v1'})
 
-        def parse_response(*args, **kwargs):
-            slot = 123
-            r_host = 'nosuchhost'
-            r_port = 7001
+        original_parse_response = redis.Redis.parse_response
 
-            raise MovedError(f"{slot} {r_host}:{r_port}")
+        def parse_response(*args, **kwargs):
+            if args[2] == 'BRPOP':
+                slot = 123
+                r_host = 'nosuchhost'
+                r_port = 7001
+
+                raise MovedError(f"{slot} {r_host}:{r_port}")
+            else:
+                return original_parse_response(*args)
 
         with patch('redis.Redis.parse_response', parse_response):
             try:
                 message = queue.get(timeout=1)
-            except Exception as e:
+            except queue.Empty:
                 pass
+            except:
+                raise
             assert conn.default_channel.client.reinitialize_counter != 0
 
 
@@ -99,18 +106,25 @@ def test_askerror(connection):
         queue = conn.SimpleQueue('test_askerror')
         queue.put({'Hello': 'World'}, headers={'k1': 'v1'})
 
-        def parse_response(*args, **kwargs):
-            slot = 123
-            r_host = 'nosuchhost'
-            r_port = 7001
+        original_parse_response = redis.Redis.parse_response
 
-            raise AskError(f"{slot} {r_host}:{r_port}")
+        def parse_response(*args, **kwargs):
+            if args[2] == 'BRPOP':
+                slot = 123
+                r_host = 'nosuchhost'
+                r_port = 7001
+
+                raise AskError(f"{slot} {r_host}:{r_port}")
+            else:
+                return original_parse_response(*args)
 
         with patch('redis.Redis.parse_response', parse_response):
             try:
                 message = queue.get(timeout=1)
-            except Exception as e:
+            except queue.Empty:
                 pass
+            except:
+                raise
             assert conn.default_channel.ask_errors.get('test_askerror') is not None
 
 
