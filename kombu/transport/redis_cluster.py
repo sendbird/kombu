@@ -182,13 +182,14 @@ class ClusterPoller(MultiChannelPoller):
         self.poller.register(sock, self.eventflags)
 
     def _unregister(self, channel, client, conn, cmd):
+        sock = self._chan_to_sock[(channel, client, conn, cmd)]
+        fileno = sock.fileno()
+
         if conn.client:
             conn.client.close()
             conn.client = None
 
-        sock = self._chan_to_sock[(channel, client, conn, cmd)]
-
-        del self._fd_to_chan[sock.fileno()]
+        del self._fd_to_chan[fileno]
         del self._chan_to_sock[(channel, client, conn, cmd)]
 
         self.poller.unregister(sock)
