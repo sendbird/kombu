@@ -189,7 +189,8 @@ class ClusterPoller(MultiChannelPoller):
             conn.client.close()
             conn.client = None
 
-        del self._fd_to_chan[fileno]
+        if fileno in self._fd_to_chan:  # fileno can be -1 if socket is already closed
+            del self._fd_to_chan[fileno]
         del self._chan_to_sock[(channel, client, conn, cmd)]
 
         self.poller.unregister(sock)
