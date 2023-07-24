@@ -147,7 +147,7 @@ class RedisNodeConnection():
 class ClusterPoller(MultiChannelPoller):
     def __init__(self):
         super().__init__()
-        self._sock_to_fileno = {}
+        self._sock_to_fd = {}
 
     def _register(self, channel, client, conn, cmd):
         ident = (channel, client, conn, cmd)
@@ -182,20 +182,20 @@ class ClusterPoller(MultiChannelPoller):
         sock = conn.client.connection._sock
         self._fd_to_chan[sock.fileno()] = (channel, conn, cmd)
         self._chan_to_sock[ident] = sock
-        self._sock_to_fileno[sock] = sock.fileno()
+        self._sock_to_fd[sock] = sock.fileno()
         self.poller.register(sock, self.eventflags)
 
     def _unregister(self, channel, client, conn, cmd):
         sock = self._chan_to_sock[(channel, client, conn, cmd)]
-        fileno = self._sock_to_fileno[sock]
+        fd = self._sock_to_fd[sock]
 
         if conn.client:
             conn.client.close()
             conn.client = None
 
-        del self._fd_to_chan[fileno]
+        del self._fd_to_chan[fd]
         del self._chan_to_sock[(channel, client, conn, cmd)]
-        del self._sock_to_fileno[sock]
+        del self._sock_to_fd[sock]
 
         self.poller.unregister(sock)
 
