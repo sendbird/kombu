@@ -351,8 +351,10 @@ class Channel(RedisChannel):
 
         try:
             resp = self.parse_response(conn, 'BRPOP', **options)
-        except self.connection_errors:
+        except:
+            # We should not throw error on this method to make kombu to continue operation
             raise Empty()
+
         conn.client.connection.send_command('BRPOP', conn.key, conn.timeout) # schedule next BRPOP
 
         if resp:
@@ -364,9 +366,10 @@ class Channel(RedisChannel):
             resp = self.parse_response(conn, 'BRPOP', **options)
             if resp:
                 self.deliver_response(resp)
-        except self.connection_errors as e:
+        except Exception:
             # We should not throw error on this method to make kombu to continue operation
-            logger.error('Error while reading from Redis', extra={"e": e, "key": conn.key})
+            # Error is logged at `parse_response`
+            pass
 
         self.connection.cycle._unregister(self, self.client, conn, 'BRPOP')
 
@@ -381,6 +384,7 @@ class Channel(RedisChannel):
             return conn.client.parse_response(conn.client.connection, cmd, **options)
         except Exception as e:
             logger.error('Error while reading from Redis', extra={"e": e, "key": conn.key})
+
             # Mostly copied from https://github.com/sendbird/redis-py/blob/master/redis/cluster.py#L1173
             if isinstance(e, ConnectionError) or isinstance(e, TimeoutError):
                 try:
