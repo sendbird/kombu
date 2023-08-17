@@ -203,6 +203,8 @@ class ClusterPoller(MultiChannelPoller):
 
     def discard(self, channel):
         super().discard(channel)
+
+        # Channel is being removed, unregister all connection belong to channel
         conns_to_unregister = [conn for conn in self._chan_to_sock if conn[0] == channel]
         for conn in conns_to_unregister:
             self._unregister(*conn)
