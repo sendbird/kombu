@@ -42,6 +42,20 @@ def invalid_connection():
     return kombu.Connection('redis-cluster://localhost:12345')
 
 
+def test_connection_reuse(connection):
+    from kombu.transport.redis_cluster import RedisClusterConnection
+
+    assert len(RedisClusterConnection.connections) == 0
+    with connection as conn:
+        queue = conn.SimpleQueue('test_connectionerror')
+        queue.put({'Hello': 'World'}, headers={'k1': 'v1'})
+        _ = queue.get(timeout=1)
+
+        assert len(RedisClusterConnection.connections) == 1
+
+    assert len(RedisClusterConnection.connections) == 0
+
+
 def test_ssl_connection():
     def patched_init(self, **kwargs):
         assert kwargs['password'] == 'test_password'
