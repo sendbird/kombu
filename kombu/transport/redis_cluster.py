@@ -221,7 +221,8 @@ class ClusterPoller(MultiChannelPoller):
                 except Exception as e:
                     logger.error('Error while registering BRPOP', extra={"e": e, "key": conn.key})
 
-        channel._brpop_start()
+        timeout = channel.connection.client.transport_options.get('brpop_timeout', 1)
+        channel._brpop_start(timeout)
 
     def on_poll_init(self, poller):
         self.poller = poller
@@ -317,6 +318,7 @@ class Channel(RedisChannel):
         'namespace',
         'keyprefix_queue',
         'keyprefix_fanout',
+        'brpop_timeout'
     )
 
     def __init__(self, conn, *args, **kwargs):
@@ -364,12 +366,10 @@ class Channel(RedisChannel):
 
         RedisClusterConnection.close(self.client)
 
-    def _brpop_start(self, timeout=1):
+    def _brpop_start(self, timeout):
         queues = self._queue_cycle.consume(len(self.active_queues))
         if not queues:
             return
-
-        timeout = timeout or 0
 
         for key in queues:
             for _, _, conn, _ in self.connection.cycle._chan_to_sock:
@@ -396,7 +396,7 @@ class Channel(RedisChannel):
             # We should not throw error on this method to make kombu to continue operation
             raise Empty()
 
-        conn.client.connection.send_command('BRPOP', conn.key, conn.timeout) # schedule next BRPOP
+        conn.client.connection.send_command('BRPOP', conn.key, conn.timeout)  # schedule next BRPOP
 
         if resp:
             self.deliver_response(resp)

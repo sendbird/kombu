@@ -42,6 +42,24 @@ def invalid_connection():
     return kombu.Connection('redis-cluster://localhost:12345')
 
 
+def test_brpop_timeout():
+    def patched_brpop_start(self, timeout):
+        assert timeout == 10
+
+
+    with patch('kombu.transport.redis_cluster.Channel._brpop_start', patched_brpop_start):
+        conn = kombu.Connection('redis-cluster://localhost:7000', transport_options={'brpop_timeout': 10})
+
+        queue = conn.SimpleQueue('test_connectionerror')
+        queue.put({'Hello': 'World'}, headers={'k1': 'v1'})
+        try:
+            _ = queue.get(timeout=1)
+        except queue.Empty:
+            pass
+
+        conn.close()
+
+
 def test_connection_reuse(connection):
     from kombu.transport.redis_cluster import RedisClusterConnection
 
