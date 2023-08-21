@@ -189,7 +189,11 @@ class ClusterPoller(MultiChannelPoller):
         sock = self._chan_to_sock[(channel, client, conn, cmd)]
         fd = self._sock_to_fd[sock]
 
+        self.poller.unregister(sock)
         if conn.client:
+            if conn.client.connection:
+                # There might be pending BRPOP response on the connection, so we disconnect to ensure safety
+                conn.client.connection.disconnect()
             conn.client.close()
             conn.client = None
 
@@ -197,7 +201,13 @@ class ClusterPoller(MultiChannelPoller):
         del self._chan_to_sock[(channel, client, conn, cmd)]
         del self._sock_to_fd[sock]
 
-        self.poller.unregister(sock)
+    def discard(self, channel):
+        super().discard(channel)
+
+        # Channel is being removed, unregister all connection belong to channel
+        conns_to_unregister = [conn for conn in self._chan_to_sock if conn[0] == channel]
+        for conn in conns_to_unregister:
+            self._unregister(*conn)
 
     def _register_BRPOP(self, channel):
         conns = self._get_conns_for_channel(channel)
@@ -259,6 +269,37 @@ class ClusterPoller(MultiChannelPoller):
         if chan.qos.can_consume():
             return chan.handlers[cmd](**{'conn': conn})
 
+
+class RedisClusterConnection():
+    connections = {}
+    connection_to_key = {}
+    refcounts = {}
+
+    @classmethod
+    def get_connection(cls, host, port, password, ssl):
+        key = (host, port, password, ssl)
+        if key not in cls.connections:
+            connection = create_redis_cluster_connection(host, port, password, ssl)
+            cls.connections[key] = connection
+            cls.connection_to_key[connection] = key
+            cls.refcounts[key] = 0
+
+        cls.refcounts[key] += 1
+
+        return cls.connections[key]
+
+    @classmethod
+    def close(cls, connection):
+        key = cls.connection_to_key[connection]
+
+        cls.refcounts[key] -= 1
+        if cls.refcounts[key] == 0:
+            connection.close()
+            del cls.refcounts[key]
+            del cls.connection_to_key[connection]
+            del cls.connections[key]
+
+
 class Channel(RedisChannel):
 
     QoS = QoS
@@ -316,12 +357,12 @@ class Channel(RedisChannel):
         transport = self.connection.client.transport_cls
         ssl = transport == 'rediss-cluster'
 
-        return create_redis_cluster_connection(hostname, port, password, ssl)
+        return RedisClusterConnection.get_connection(hostname, port, password, ssl)
 
     def close(self):
         super().close()
 
-        self.client.close()
+        RedisClusterConnection.close(self.client)
 
     def _brpop_start(self, timeout=1):
         queues = self._queue_cycle.consume(len(self.active_queues))
