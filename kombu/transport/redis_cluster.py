@@ -2,6 +2,7 @@ from contextlib import contextmanager
 from time import time, sleep
 from queue import Empty
 from collections import defaultdict
+from typing import Set, Dict
 
 from kombu.log import get_logger
 from kombu.utils.encoding import bytes_to_str
@@ -244,6 +245,7 @@ class ClusterPoller(MultiChannelPoller):
     def _get_conns_for_channel(self, channel):
         result = []
         conns = [conn for _, _, conn, _ in self._chan_to_sock]
+
         for key in channel.active_queues:
             try:
                 conn = next(x for x in conns if x.key == key)
@@ -302,6 +304,14 @@ class RedisClusterConnection():
             del cls.connections[key]
 
 
+class RedisNodeConfiguration():
+    def __init__(self, name: str, slots: Set[int]):
+        self.name = name
+        self.slots = slots
+
+    def keyslot_in_node(self, keyslot: int) -> bool:
+        return keyslot in self.slots
+
 class Channel(RedisChannel):
 
     QoS = QoS
@@ -319,7 +329,8 @@ class Channel(RedisChannel):
         'namespace',
         'keyprefix_queue',
         'keyprefix_fanout',
-        'brpop_timeout'
+        'brpop_timeout',
+        'queue_names_per_slot'
     )
 
     def __init__(self, conn, *args, **kwargs):
@@ -342,6 +353,39 @@ class Channel(RedisChannel):
             if P:
                 M, EX, RK = loads(bytes_to_str(P))  # json is unicode
                 self._do_restore_message(M, EX, RK, client, leftmost)
+
+    def get_redis_configuration(self) -> Dict[str, RedisNodeConfiguration]:
+        nodes: Dict[str, RedisNodeConfiguration] = {}
+
+        for slot, node in self.client.nodes_manager.slots_cache.items():
+            found = nodes.get(node[0].name)
+            if found is None:
+                nodes[node[0].name] = RedisNodeConfiguration(name=node[0].name, slots={int(slot)})
+            else:
+                found.slots.add(int(slot))
+        return nodes
+
+    def get_physical_queues(self):
+        redis_configuration = self.get_redis_configuration()
+
+        queue_names_per_slot = self.connection.client.transport_options.get('queue_names_per_slot', None)
+        if not queue_names_per_slot:
+            result = {}
+            for queue in self.active_queues:
+                result[queue] = [queue]
+            return result
+
+        result = {}
+        for queue in self.active_queues:
+            result[queue] = []
+            if queue in queue_names_per_slot:
+                for node in redis_configuration.values():
+                    first_slot = next(iter(node.slots))
+
+                    result[queue].append(queue_names_per_slot[queue][first_slot])
+
+        return result
+
 
     @contextmanager
     def conn_or_acquire(self, client=None):

@@ -1,17 +1,14 @@
 from __future__ import annotations
 
 import os
-import queue
+from case import patch
 
 import pytest
 import redis
-
-from case import patch
-
 from redis.exceptions import MovedError, AskError
+from redis.crc import key_slot, REDIS_CLUSTER_HASH_SLOTS
 
 import kombu
-from kombu.transport.redis_cluster import Transport
 
 from .common import (BasicFunctionality)
 
@@ -206,3 +203,34 @@ def test_many_queue(connection):
             assert message.content_encoding == 'utf-8'
             assert message.headers == {'k1': 'v1'}
             message.ack()
+
+
+def test_physical_queue_names_precomputed():
+    queues = {}
+    remaining = REDIS_CLUSTER_HASH_SLOTS
+    for i in range(0, 2**32):
+        key = f'test:{{queue{i}}}'
+        keyslot = key_slot(key.encode('utf-8'))
+
+        if keyslot not in queues:
+            queues[keyslot] = key
+            remaining -= 1
+
+        if remaining == 0:
+            break
+
+    conn = kombu.Connection('redis-cluster://localhost:7000', transport_options={'queue_names_per_slot': {'test': queues}})
+    conn.default_channel._active_queues.append('test')
+    queues = conn.default_channel.get_physical_queues()
+    assert queues == {'test': ['test:{queue937}', 'test:{queue20909}', 'test:{queue9161}']}
+
+    conn.close()
+
+
+def test_physical_queue_names():
+    conn = kombu.Connection('redis-cluster://localhost:7000')
+    conn.default_channel._active_queues.append('test')
+    queues = conn.default_channel.get_physical_queues()
+    assert queues == {'test': ['test']}
+
+    conn.close()
