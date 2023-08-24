@@ -205,11 +205,11 @@ def test_many_queue(connection):
             message.ack()
 
 
-def test_physical_queue_names_precomputed():
+def get_queue_names(queue: str):
     queues = {}
     remaining = REDIS_CLUSTER_HASH_SLOTS
     for i in range(0, 2**32):
-        key = f'test:{{queue{i}}}'
+        key = f'test:{{{queue}{i}}}'
         keyslot = key_slot(key.encode('utf-8'))
 
         if keyslot not in queues:
@@ -218,6 +218,11 @@ def test_physical_queue_names_precomputed():
 
         if remaining == 0:
             break
+
+    return queues
+
+def test_physical_queue_names_precomputed():
+    queues = get_queue_names('queue')
 
     conn = kombu.Connection('redis-cluster://localhost:7000', transport_options={'queue_names_per_slot': {'test': queues}})
     conn.default_channel._active_queues.append('test')
@@ -232,5 +237,23 @@ def test_physical_queue_names():
     conn.default_channel._active_queues.append('test')
     queues = conn.default_channel.get_physical_queues()
     assert queues == {'test': ['test']}
+
+    conn.close()
+
+
+def test_physical_queue_names_messages():
+    queues = get_queue_names('queue')
+
+    conn = kombu.Connection('redis-cluster://localhost:7000', transport_options={'queue_names_per_slot': {'queue': queues}})
+
+    queue = conn.SimpleQueue('queue')
+    queue.put({'Hello': 'World'}, headers={'k1': 'v1'})
+
+    message = queue.get(timeout=1)
+    assert message.payload == {'Hello': 'World'}
+    assert message.content_type == 'application/json'
+    assert message.content_encoding == 'utf-8'
+    assert message.headers == {'k1': 'v1'}
+    message.ack()
 
     conn.close()

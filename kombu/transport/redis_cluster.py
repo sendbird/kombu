@@ -3,6 +3,7 @@ from time import time, sleep
 from queue import Empty
 from collections import defaultdict
 from typing import Set, Dict
+import random
 
 from kombu.log import get_logger
 from kombu.utils.encoding import bytes_to_str
@@ -139,9 +140,10 @@ class QoS(RedisQoS):
 
 
 class RedisNodeConnection():
-    def __init__(self, key):
+    def __init__(self, queue, key):
         self.client = None
         self.in_poll = False
+        self.queue = queue
         self.key = key
         self.timeout = None
 
@@ -185,6 +187,7 @@ class ClusterPoller(MultiChannelPoller):
         self._chan_to_sock[ident] = sock
         self._sock_to_fd[sock] = sock.fileno()
         self.poller.register(sock, self.eventflags)
+        logger.debug(f'registering to queue {conn.key}')
 
     def _unregister(self, channel, client, conn, cmd):
         sock = self._chan_to_sock[(channel, client, conn, cmd)]
@@ -246,13 +249,16 @@ class ClusterPoller(MultiChannelPoller):
         result = []
         conns = [conn for _, _, conn, _ in self._chan_to_sock]
 
-        for key in channel.active_queues:
-            try:
-                conn = next(x for x in conns if x.key == key)
-                conns.remove(conn)
-            except StopIteration:
-                conn = RedisNodeConnection(key)
-            result.append(conn)
+        queues = channel.get_physical_queues(channel.active_queues)
+
+        for queue_name, queue in queues.items():
+            for key in queue:
+                try:
+                    conn = next(x for x in conns if x.queue == queue_name and x.key == key)
+                    conns.remove(conn)
+                except StopIteration:
+                    conn = RedisNodeConnection(queue_name, key)
+                result.append(conn)
 
         return result
 
@@ -365,18 +371,18 @@ class Channel(RedisChannel):
                 found.slots.add(int(slot))
         return nodes
 
-    def get_physical_queues(self):
+    def get_physical_queues(self, queues):
         redis_configuration = self.get_redis_configuration()
 
         queue_names_per_slot = self.connection.client.transport_options.get('queue_names_per_slot', None)
         if not queue_names_per_slot:
             result = {}
-            for queue in self.active_queues:
+            for queue in queues:
                 result[queue] = [queue]
             return result
 
         result = {}
-        for queue in self.active_queues:
+        for queue in queues:
             result[queue] = []
             if queue in queue_names_per_slot:
                 for node in redis_configuration.values():
@@ -385,6 +391,15 @@ class Channel(RedisChannel):
                     result[queue].append(queue_names_per_slot[queue][first_slot])
 
         return result
+
+    def _q_for_pri(self, queue, pri):
+        queues = self.get_physical_queues([queue])
+        queue = random.choice(queues[queue])
+
+        pri = self.priority(pri)
+        if pri:
+            return "{}{}{}".format(queue, self.sep, pri)
+        return queue
 
 
     @contextmanager
@@ -415,25 +430,30 @@ class Channel(RedisChannel):
         if not queues:
             return
 
-        for key in queues:
-            for _, _, conn, _ in self.connection.cycle._chan_to_sock:
-                if conn.key == key and conn.in_poll == False:
-                    conn.in_poll = True
-                    conn.timeout = timeout
-                    if conn.key in self.ask_errors:
-                        del self.ask_errors[conn.key]
-                        try:
-                            conn.client.execute_command('ASKING')
-                        except Exception as e:
-                            logger.warning('Error while sending ASKING', extra={"e": e, "key": conn.key})
-                            continue
+        timeout = timeout or 0
 
-                    try:
-                        conn.client.connection.send_command('BRPOP', key, timeout)
-                    except:
-                        logger.exception('Error while sending BRPOP', extra={"key": conn.key})
-                        self.connection.cycle._unregister(self, self.client, conn, 'BRPOP')
-                    break
+        physical_queues = self.get_physical_queues(queues)
+
+        for queue in physical_queues.values():
+            for key in queue:
+                for _, _, conn, _ in self.connection.cycle._chan_to_sock:
+                    if conn.key == key and conn.in_poll == False:
+                        conn.in_poll = True
+                        conn.timeout = timeout
+                        if conn.key in self.ask_errors:
+                            del self.ask_errors[conn.key]
+                            try:
+                                conn.client.execute_command('ASKING')
+                            except Exception as e:
+                                logger.warning('Error while sending ASKING', extra={"e": e, "key": conn.key})
+                                continue
+                        try:
+                            conn.client.connection.send_command('BRPOP', key, timeout)
+                        except:
+                            logger.exception('Error while sending BRPOP', extra={"key": conn.key})
+                            self.connection.cycle._unregister(self, self.client, conn, 'BRPOP')
+                        break
+
 
     def _brpop_read(self, **options):
         conn = options.pop('conn')
@@ -447,14 +467,14 @@ class Channel(RedisChannel):
         conn.client.connection.send_command('BRPOP', conn.key, conn.timeout)  # schedule next BRPOP
 
         if resp:
-            self.deliver_response(resp)
+            self.deliver_response(conn.queue, resp)
             return True
 
     def _poll_error(self, cmd, conn, **options):
         try:
             resp = self.parse_response(conn, 'BRPOP', **options)
             if resp:
-                self.deliver_response(resp)
+                self.deliver_response(conn.queue, resp)
         except Exception:
             # We should not throw error on this method to make kombu to continue operation
             # Error is logged at `parse_response`
@@ -462,9 +482,9 @@ class Channel(RedisChannel):
 
         self.connection.cycle._unregister(self, self.client, conn, 'BRPOP')
 
-    def deliver_response(self, resp):
+    def deliver_response(self, queue, resp):
         dest, item = resp
-        dest = bytes_to_str(dest).rsplit(self.sep, 1)[0]
+        dest = bytes_to_str(queue).rsplit(self.sep, 1)[0]
         self._queue_cycle.rotate(dest)
         self.connection._deliver(loads(bytes_to_str(item)), dest)
 
