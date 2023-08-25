@@ -322,7 +322,6 @@ class Channel(RedisChannel):
     def __init__(self, conn, *args, **kwargs):
         super().__init__(conn, *args, **kwargs)
 
-        self.client.info()
         self.ask_errors = {}
 
     def _restore(self, message, leftmost=False):
