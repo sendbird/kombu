@@ -388,7 +388,7 @@ class Channel(RedisChannel):
                         conn.client.connection.send_command('BRPOP', key, timeout)
                     except:
                         logger.exception('Error while sending BRPOP', extra={"key": conn.key})
-                        self.connection.cycle._unregister(self, self.client, conn, cmd)
+                        self.connection.cycle._unregister(self, self.client, conn, 'BRPOP')
                     break
 
     def _brpop_read(self, **options):
