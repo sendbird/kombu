@@ -74,6 +74,27 @@ def test_connection_reuse(connection):
     assert len(RedisClusterConnection.connections) == 0
 
 
+def test_brpop_send_error(connection):
+    with connection as conn:
+        queue = conn.SimpleQueue('test_connectionerror')
+        queue.put({'Hello': 'World'}, headers={'k1': 'v1'})
+
+        original_send_command = redis.connection.Connection.send_command
+        def send_command(*args, **kwargs):
+            if args[1] == 'BRPOP':
+                raise redis.exceptions.ConnectionError()
+            else:
+                return original_send_command(*args)
+
+        with patch('redis.connection.Connection.send_command', send_command):
+            try:
+                _ = queue.get(timeout=1)
+            except queue.Empty:
+                pass
+            except:
+                raise
+
+
 def test_ssl_connection():
     def patched_init(self, **kwargs):
         assert kwargs['password'] == 'test_password'
