@@ -265,6 +265,7 @@ class ClusterPoller(MultiChannelPoller):
         try:
             chan, conn, cmd = self._fd_to_chan[fileno]
         except KeyError:
+            self.poller.unregister(fileno)
             return
 
         if chan.qos.can_consume():
