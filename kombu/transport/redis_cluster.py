@@ -2,7 +2,7 @@ from contextlib import contextmanager
 from time import time, sleep
 from queue import Empty
 from collections import defaultdict
-from typing import Set, Dict
+from typing import Set, Dict, Optional, List
 import random
 
 from kombu.log import get_logger
@@ -249,15 +249,15 @@ class ClusterPoller(MultiChannelPoller):
         result = []
         conns = [conn for _, _, conn, _ in self._chan_to_sock]
 
-        queues = channel.get_physical_queues(channel.active_queues)
+        physical_queues = channel.get_physical_queues(channel.active_queues)
 
-        for queue_name, queue in queues.items():
-            for key in queue:
+        for queue_name, physical_queue in physical_queues.items():
+            for physical_queue_name in physical_queue.alive_queues():
                 try:
-                    conn = next(x for x in conns if x.queue == queue_name and x.key == key)
+                    conn = next(x for x in conns if x.queue == queue_name and x.key == physical_queue_name)
                     conns.remove(conn)
                 except StopIteration:
-                    conn = RedisNodeConnection(queue_name, key)
+                    conn = RedisNodeConnection(queue_name, physical_queue_name)
                 result.append(conn)
 
         return result
@@ -318,6 +318,22 @@ class RedisNodeConfiguration():
     def keyslot_in_node(self, keyslot: int) -> bool:
         return keyslot in self.slots
 
+
+class PhysicalQueue():
+
+    def __init__(self, queues: Dict[str, Optional[int]]):
+        self.queues = queues
+
+    def alive_queues(self) -> List[str]:
+        now = time()
+
+        return [x for x in self.queues if self.queues[x] is None or self.queues[x] > now]
+
+    def queue_expiry(self, queue) -> Optional[int]:
+        return self.queues[queue]
+
+
+
 class Channel(RedisChannel):
 
     QoS = QoS
@@ -343,6 +359,7 @@ class Channel(RedisChannel):
         super().__init__(conn, *args, **kwargs)
 
         self.ask_errors = {}
+        self.physical_queues = {}
 
     def _restore(self, message, leftmost=False):
         if not self.ack_emulation:
@@ -372,6 +389,19 @@ class Channel(RedisChannel):
         return nodes
 
     def get_physical_queues(self, queues):
+        result = {k: v for k, v in self.physical_queues.items() if k in queues}
+
+        remaining_queues = [x for x in queues if x not in result]
+        if remaining_queues:
+            queue_names = self.compute_physical_queue_names(remaining_queues)
+            for queue in remaining_queues:
+                configuration = PhysicalQueue({x: None for x in queue_names[queue]})
+                result[queue] = configuration
+                self.physical_queues[queue] = configuration
+
+        return result
+
+    def compute_physical_queue_names(self, queues):
         redis_configuration = self.get_redis_configuration()
 
         queue_names_per_slot = self.connection.client.transport_options.get('queue_names_per_slot', None)
@@ -394,7 +424,7 @@ class Channel(RedisChannel):
 
     def _q_for_pri(self, queue, pri):
         queues = self.get_physical_queues([queue])
-        queue = random.choice(queues[queue])
+        queue = random.choice(queues[queue].alive_queues())
 
         pri = self.priority(pri)
         if pri:
@@ -434,10 +464,10 @@ class Channel(RedisChannel):
 
         physical_queues = self.get_physical_queues(queues)
 
-        for queue in physical_queues.values():
-            for key in queue:
+        for physical_queue in physical_queues.values():
+            for physical_queue_name in physical_queue.alive_queues():
                 for _, _, conn, _ in self.connection.cycle._chan_to_sock:
-                    if conn.key == key and conn.in_poll == False:
+                    if conn.key == physical_queue_name and conn.in_poll == False:
                         conn.in_poll = True
                         conn.timeout = timeout
                         if conn.key in self.ask_errors:
@@ -448,7 +478,10 @@ class Channel(RedisChannel):
                                 logger.warning('Error while sending ASKING', extra={"e": e, "key": conn.key})
                                 continue
                         try:
-                            conn.client.connection.send_command('BRPOP', key, timeout)
+                            queue_timeout = timeout
+                            if physical_queue.queue_expiry(physical_queue_name):
+                                queue_timeout = min(physical_queue.queue_expiry(physical_queue_name) - time(), timeout)
+                            conn.client.connection.send_command('BRPOP', physical_queue_name, queue_timeout)
                         except:
                             logger.exception('Error while sending BRPOP', extra={"key": conn.key})
                             self.connection.cycle._unregister(self, self.client, conn, 'BRPOP')

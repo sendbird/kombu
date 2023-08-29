@@ -226,7 +226,7 @@ def test_physical_queue_names_precomputed():
 
     conn = kombu.Connection('redis-cluster://localhost:7000', transport_options={'queue_names_per_slot': {'test': queues}})
     conn.default_channel._active_queues.append('test')
-    queues = conn.default_channel.get_physical_queues()
+    queues = conn.default_channel.compute_physical_queue_names(['test'])
     assert queues == {'test': ['test:{queue937}', 'test:{queue20909}', 'test:{queue9161}']}
 
     conn.close()
@@ -235,7 +235,7 @@ def test_physical_queue_names_precomputed():
 def test_physical_queue_names():
     conn = kombu.Connection('redis-cluster://localhost:7000')
     conn.default_channel._active_queues.append('test')
-    queues = conn.default_channel.get_physical_queues()
+    queues = conn.default_channel.compute_physical_queue_names(['test'])
     assert queues == {'test': ['test']}
 
     conn.close()
