@@ -145,7 +145,6 @@ class RedisNodeConnection():
         self.in_poll = False
         self.queue = queue
         self.key = key
-        self.timeout = None
 
 class ClusterPoller(MultiChannelPoller):
     def __init__(self):
@@ -225,8 +224,7 @@ class ClusterPoller(MultiChannelPoller):
                 except Exception as e:
                     logger.error('Error while registering BRPOP', extra={"e": e, "key": conn.key})
 
-        timeout = channel.connection.client.transport_options.get('brpop_timeout', 1)
-        channel._brpop_start(timeout)
+        channel._brpop_start()
 
     def on_poll_init(self, poller):
         self.poller = poller
@@ -319,6 +317,10 @@ class RedisNodeConfiguration():
         return keyslot in self.slots
 
 
+# We create physical queue as a list on each redis cluster node to ensure even distribution.
+# On scale-in/out, we should listen to old queue names for a while to ensure no message is lost.
+# To do this, we compute new physical queue names and set expiry for old queue names on redis slot change event.
+# Also, we store queue names on redis to ensure we don't lose old queue names on worker start.
 class PhysicalQueue():
 
     def __init__(self, queues: Dict[str, Optional[int]]):
@@ -342,6 +344,8 @@ class Channel(RedisChannel):
     unacked_key = '_kombu.unacked.{{{queue}}}'
     unacked_index_key = '_kombu.unacked_index.{{{queue}}}'
     unacked_mutex_key = '_kombu.unacked_mutex.{{{queue}}}'
+    physical_queue_cache_key = '_kombu.physical_queue.{{{queue}}}'
+    physical_queue_timeout = 600000 # 10 minutes
 
     min_priority = 0
     max_priority = 0
@@ -393,11 +397,32 @@ class Channel(RedisChannel):
 
         remaining_queues = [x for x in queues if x not in result]
         if remaining_queues:
-            queue_names = self.compute_physical_queue_names(remaining_queues)
+            new_physical_queues = self.compute_physical_queue_names(remaining_queues)
             for queue in remaining_queues:
-                configuration = PhysicalQueue({x: None for x in queue_names[queue]})
-                result[queue] = configuration
-                self.physical_queues[queue] = configuration
+                # Load queue names from redis to ensure listening physical queues before last redis slot configuration change.
+                cached_physical_queues = self.client.hgetall(self.physical_queue_cache_key.format(queue=queue))
+
+                # Merge cached and computed queue
+                # if newly computed queue is not in cached_queue_names and has no expire, we should set its expiry
+                merged_physical_queues = {}
+
+                for queue_name in new_physical_queues[queue]:
+                    merged_physical_queues[queue_name] = None
+                    if queue_name not in cached_physical_queues:
+                        merged_physical_queues[queue_name] = time() + self.physical_queue_timeout
+                for queue_name, timeout in cached_physical_queues.items():
+                    queue_name = queue_name.decode('utf-8')
+                    if queue_name not in merged_physical_queues:
+                        merged_physical_queues[queue_name] = timeout
+
+                physical_queue = PhysicalQueue(merged_physical_queues)
+
+                result[queue] = physical_queue
+                self.physical_queues[queue] = physical_queue
+
+                # And update cache..
+                for queue_name, timeout in merged_physical_queues.items():
+                    self.client.hset(self.physical_queue_cache_key.format(queue=queue), queue_name, timeout)
 
         return result
 
@@ -455,21 +480,18 @@ class Channel(RedisChannel):
 
         RedisClusterConnection.close(self.client)
 
-    def _brpop_start(self, timeout):
+    def _brpop_start(self):
         queues = self._queue_cycle.consume(len(self.active_queues))
         if not queues:
             return
 
-        timeout = timeout or 0
-
         physical_queues = self.get_physical_queues(queues)
 
-        for physical_queue in physical_queues.values():
+        for queue, physical_queue in physical_queues.items():
             for physical_queue_name in physical_queue.alive_queues():
                 for _, _, conn, _ in self.connection.cycle._chan_to_sock:
                     if conn.key == physical_queue_name and conn.in_poll == False:
                         conn.in_poll = True
-                        conn.timeout = timeout
                         if conn.key in self.ask_errors:
                             del self.ask_errors[conn.key]
                             try:
@@ -478,15 +500,26 @@ class Channel(RedisChannel):
                                 logger.warning('Error while sending ASKING', extra={"e": e, "key": conn.key})
                                 continue
                         try:
-                            queue_timeout = timeout
-                            if physical_queue.queue_expiry(physical_queue_name):
-                                queue_timeout = min(physical_queue.queue_expiry(physical_queue_name) - time(), timeout)
-                            conn.client.connection.send_command('BRPOP', physical_queue_name, queue_timeout)
+                            brpop_timeout = self.get_brpop_timeout(queue, physical_queue_name)
+                            conn.client.connection.send_command('BRPOP', physical_queue_name, brpop_timeout)
                         except:
                             logger.exception('Error while sending BRPOP', extra={"key": conn.key})
                             self.connection.cycle._unregister(self, self.client, conn, 'BRPOP')
                         break
 
+    def get_brpop_timeout(self, queue, physical_queue_name):
+        timeout = self.connection.client.transport_options.get('brpop_timeout', 1)
+
+        physical_queue = self.get_physical_queues([queue])[queue]
+
+        expiry = physical_queue.queue_expiry(physical_queue_name)
+        if expiry:
+            if not timeout:
+                return expiry - time()
+            else:
+                return min(expiry - time(), timeout)
+
+        return 0
 
     def _brpop_read(self, **options):
         conn = options.pop('conn')
@@ -497,7 +530,8 @@ class Channel(RedisChannel):
             # We should not throw error on this method to make kombu to continue operation
             raise Empty()
 
-        conn.client.connection.send_command('BRPOP', conn.key, conn.timeout)  # schedule next BRPOP
+        brpop_timeout = self.get_brpop_timeout(conn.queue, conn.key)
+        conn.client.connection.send_command('BRPOP', conn.key, brpop_timeout)  # schedule next BRPOP
 
         if resp:
             self.deliver_response(conn.queue, resp)
