@@ -263,6 +263,8 @@ def test_physical_queue_names_cache():
     queues = get_queue_names('queue')
 
     conn = kombu.Connection('redis-cluster://localhost:7000', transport_options={'queue_names_per_slot': {'queue': queues}})
+    key = conn.default_channel.physical_queue_cache_key.format(queue='queue')
+    conn.default_channel.client.delete(key)
 
     queue = conn.SimpleQueue('queue')
     queue.put({'Hello': 'World'}, headers={'k1': 'v1'})
@@ -281,3 +283,74 @@ def test_physical_queue_names_cache():
 
     conn.close()
 
+    def patched_get_redis_configuration(self):
+        from kombu.transport.redis_cluster import RedisNodeConfiguration
+
+        return {
+            "node1": RedisNodeConfiguration("node1", set(range(5000, 10999))),
+            "node2": RedisNodeConfiguration("node2", set(range(11000, 16383))),
+            "node3": RedisNodeConfiguration("node3", set(range(0, 4999))),
+        }
+
+    with patch('kombu.transport.redis_cluster.Channel.get_redis_configuration', patched_get_redis_configuration):
+        conn = kombu.Connection('redis-cluster://localhost:7000', transport_options={'queue_names_per_slot': {'queue': queues}})
+
+        queue = conn.SimpleQueue('queue')
+        queue.put({'Hello': 'World'}, headers={'k1': 'v1'})
+
+        message = queue.get(timeout=1)
+        assert message.payload == {'Hello': 'World'}
+        assert message.content_type == 'application/json'
+        assert message.content_encoding == 'utf-8'
+        assert message.headers == {'k1': 'v1'}
+        message.ack()
+
+        key = conn.default_channel.physical_queue_cache_key.format(queue='queue')
+        new_result = conn.default_channel.client.hgetall(key)
+        for queue, item in new_result.items():
+            if queue in result and queue != b'test:{queue937}':  # 937 is for slot 0
+                assert item != b'0'  # should have some timeout for old queue
+            else:
+                assert item == b'0'
+
+        conn.close()
+
+
+def test_redis_slot_configuration_change():
+    queues = get_queue_names('queue')
+
+    conn = kombu.Connection('redis-cluster://localhost:7000', transport_options={'queue_names_per_slot': {'queue': queues}})
+    key = conn.default_channel.physical_queue_cache_key.format(queue='queue')
+    conn.default_channel.client.delete(key)
+
+    queue = conn.SimpleQueue('queue')
+    queue.put({'Hello': 'World'}, headers={'k1': 'v1'})
+
+    message = queue.get(timeout=1)
+    assert message.payload == {'Hello': 'World'}
+    assert message.content_type == 'application/json'
+    assert message.content_encoding == 'utf-8'
+    assert message.headers == {'k1': 'v1'}
+    message.ack()
+
+    def patched_get_redis_configuration(self):
+        from kombu.transport.redis_cluster import RedisNodeConfiguration
+
+        return {
+            "node1": RedisNodeConfiguration("node1", set(range(5000, 10999))),
+            "node2": RedisNodeConfiguration("node2", set(range(11000, 16383))),
+            "node3": RedisNodeConfiguration("node3", set(range(0, 4999))),
+        }
+
+    with patch('kombu.transport.redis_cluster.Channel.get_redis_configuration', patched_get_redis_configuration):
+        conn.default_channel.redis_configuration_changed()
+
+        queue.put({'Hello': 'World'}, headers={'k1': 'v1'})
+        message = queue.get(timeout=1)
+        assert message.payload == {'Hello': 'World'}
+        assert message.content_type == 'application/json'
+        assert message.content_encoding == 'utf-8'
+        assert message.headers == {'k1': 'v1'}
+        message.ack()
+
+    conn.close()
