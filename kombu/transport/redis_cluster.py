@@ -406,16 +406,14 @@ class Channel(RedisChannel):
                 cached_physical_queues = self.client.hgetall(self.physical_queue_cache_key.format(queue=queue))
 
                 # Merge cached and computed queue
-                # if newly computed queue is not in cached_queue_names and has no expire, we should set its expiry
-                merged_physical_queues = {}
+                # if cached_queue_names is not in new_physical_queues and has no expire, we should set its expiry
+                merged_physical_queues: Dict[str, Optional[int]] = {x: None for x in new_physical_queues[queue]}
 
-                for queue_name in new_physical_queues[queue]:
-                    merged_physical_queues[queue_name] = None
-                    if queue_name not in cached_physical_queues:
-                        merged_physical_queues[queue_name] = time() + self.physical_queue_timeout
                 for queue_name, timeout in cached_physical_queues.items():
                     queue_name = queue_name.decode('utf-8')
                     if queue_name not in merged_physical_queues:
+                        if timeout == 0:
+                            timeout = int(time() + self.physical_queue_timeout)
                         merged_physical_queues[queue_name] = timeout
 
                 physical_queue = PhysicalQueue(merged_physical_queues)
@@ -425,7 +423,8 @@ class Channel(RedisChannel):
 
                 # And update cache..
                 for queue_name, timeout in merged_physical_queues.items():
-                    self.client.hset(self.physical_queue_cache_key.format(queue=queue), queue_name, timeout)
+                    value = 0 if timeout is None else timeout
+                    self.client.hset(self.physical_queue_cache_key.format(queue=queue), queue_name, value)
 
         return result
 
@@ -446,7 +445,7 @@ class Channel(RedisChannel):
     def should_listen(self, queue, physical_queue_name):
         physical_queue = self.get_physical_queues([queue])[queue]
         expiry = physical_queue.queue_expiry(physical_queue_name)
-        if expiry < time():
+        if expiry and expiry < time():
             del self.physical_queue[queue].queues[physical_queue_name]
             self.client.hdel(self.physical_queue_cache_key.format(queue=queue), physical_queue_name)
             return False

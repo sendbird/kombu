@@ -257,3 +257,27 @@ def test_physical_queue_names_messages():
     message.ack()
 
     conn.close()
+
+
+def test_physical_queue_names_cache():
+    queues = get_queue_names('queue')
+
+    conn = kombu.Connection('redis-cluster://localhost:7000', transport_options={'queue_names_per_slot': {'queue': queues}})
+
+    queue = conn.SimpleQueue('queue')
+    queue.put({'Hello': 'World'}, headers={'k1': 'v1'})
+
+    message = queue.get(timeout=1)
+    assert message.payload == {'Hello': 'World'}
+    assert message.content_type == 'application/json'
+    assert message.content_encoding == 'utf-8'
+    assert message.headers == {'k1': 'v1'}
+    message.ack()
+
+    key = conn.default_channel.physical_queue_cache_key.format(queue='queue')
+    result = conn.default_channel.client.hgetall(key)
+    expected = {b'test:{queue937}': b'0', b'test:{queue20909}': b'0', b'test:{queue9161}': b'0'}
+    assert result == expected
+
+    conn.close()
+
