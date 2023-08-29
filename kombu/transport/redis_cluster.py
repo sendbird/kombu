@@ -429,6 +429,29 @@ class Channel(RedisChannel):
 
         return result
 
+    def get_brpop_timeout(self, queue, physical_queue_name):
+        timeout = self.connection.client.transport_options.get('brpop_timeout', 1)
+
+        physical_queue = self.get_physical_queues([queue])[queue]
+        expiry = physical_queue.queue_expiry(physical_queue_name)
+
+        if expiry:
+            if not timeout:
+                return expiry - time()
+            else:
+                return min(expiry - time(), timeout)
+
+        return 0
+
+    def should_listen(self, queue, physical_queue_name):
+        physical_queue = self.get_physical_queues([queue])[queue]
+        expiry = physical_queue.queue_expiry(physical_queue_name)
+        if expiry < time():
+            del self.physical_queue[queue].queues[physical_queue_name]
+            self.client.hdel(self.physical_queue_cache_key.format(queue=queue), physical_queue_name)
+            return False
+        return True
+
     def compute_physical_queue_names(self, queues):
         redis_configuration = self.get_redis_configuration()
 
@@ -510,20 +533,6 @@ class Channel(RedisChannel):
                             self.connection.cycle._unregister(self, self.client, conn, 'BRPOP')
                         break
 
-    def get_brpop_timeout(self, queue, physical_queue_name):
-        timeout = self.connection.client.transport_options.get('brpop_timeout', 1)
-
-        physical_queue = self.get_physical_queues([queue])[queue]
-
-        expiry = physical_queue.queue_expiry(physical_queue_name)
-        if expiry:
-            if not timeout:
-                return expiry - time()
-            else:
-                return min(expiry - time(), timeout)
-
-        return 0
-
     def _brpop_read(self, **options):
         conn = options.pop('conn')
 
@@ -534,7 +543,10 @@ class Channel(RedisChannel):
             raise Empty()
 
         brpop_timeout = self.get_brpop_timeout(conn.queue, conn.key)
-        conn.client.connection.send_command('BRPOP', conn.key, brpop_timeout)  # schedule next BRPOP
+        if self.should_listen(conn.queue, conn.key):
+            conn.client.connection.send_command('BRPOP', conn.key, brpop_timeout)  # schedule next BRPOP
+        else:
+            self.connection.cycle._unregister(self, self.client, conn, 'BRPOP')
 
         if resp:
             self.deliver_response(conn.queue, resp)
