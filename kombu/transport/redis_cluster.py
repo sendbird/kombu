@@ -392,6 +392,9 @@ class Channel(RedisChannel):
                 found.slots.add(int(slot))
         return nodes
 
+    def redis_configuration_changed(self):
+        self.physical_queues = {}  # Will be recomputed later
+
     def get_physical_queues(self, queues):
         result = {k: v for k, v in self.physical_queues.items() if k in queues}
 
@@ -569,6 +572,7 @@ class Channel(RedisChannel):
                 except Exception as e:
                     logger.error('Error while removing node', extra={"e": e, "key": conn.key})
                 self.client.nodes_manager.initialize()
+                self.redis_configuration_changed()
             elif isinstance(e, MovedError):
                 self.client.reinitialize_counter += 1
                 if self.client._should_reinitialized():
@@ -576,17 +580,20 @@ class Channel(RedisChannel):
                     self.client.reinitialize_counter = 0
                 else:
                     self.client.nodes_manager.update_moved_exception(e)
+                self.redis_configuration_changed()
             elif isinstance(e, SlotNotCoveredError):
                 self.client.reinitialize_counter += 1
                 if self.client._should_reinitialized():
                     self.client.nodes_manager.initialize()
                     self.client.reinitialize_counter = 0
+                    self.redis_configuration_changed()
             elif isinstance(e, TryAgainError):
                 return  # try again in next BRPOP
             elif isinstance(e, AskError):
                 self.add_ask_error(e, conn)
             elif isinstance(e, ClusterDownError):
                 self.client.nodes_manager.initialize()
+                self.redis_configuration_changed()
 
             self.connection.cycle._unregister(self, self.client, conn, cmd)
             raise
