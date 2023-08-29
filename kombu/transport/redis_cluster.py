@@ -411,6 +411,7 @@ class Channel(RedisChannel):
 
                 for queue_name, timeout in cached_physical_queues.items():
                     queue_name = queue_name.decode('utf-8')
+                    timeout = int(timeout)
                     if queue_name not in merged_physical_queues:
                         if timeout == 0:
                             timeout = int(time() + self.physical_queue_timeout)
