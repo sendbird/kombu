@@ -613,6 +613,9 @@ class Channel(RedisChannel):
     def add_ask_error(self, e, conn):
         self.ask_errors[conn.physical_queue] = e
 
+    def _lookup(self, exchange, routing_key, default=None):
+        return [self._q_for_pri(routing_key, 0)]
+
 
 class Transport(RedisTransport):
 
