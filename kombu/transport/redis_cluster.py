@@ -140,11 +140,11 @@ class QoS(RedisQoS):
 
 
 class RedisNodeConnection():
-    def __init__(self, queue, key):
+    def __init__(self, queue, physical_queue):
         self.client = None
         self.in_poll = False
         self.queue = queue
-        self.key = key
+        self.physical_queue = physical_queue
 
 class ClusterPoller(MultiChannelPoller):
     def __init__(self):
@@ -162,17 +162,17 @@ class ClusterPoller(MultiChannelPoller):
             backoff = [0, 0.1, 0.2, 0.4]
             while True:
                 if tries > 3:
-                    raise ValueError('Cannot find node for key: {}'.format(conn.key))
+                    raise ValueError('Cannot find node for key: {}'.format(conn.physical_queue))
                 try:
-                    if conn.key in channel.ask_errors:
-                        ask_error = channel.ask_errors[conn.key]
+                    if conn.physical_queue in channel.ask_errors:
+                        ask_error = channel.ask_errors[conn.physical_queue]
                         node = channel.client.get_node(ask_error.host, ask_error.port)
                     else:
-                        node = channel.client.get_node_from_key(conn.key)
+                        node = channel.client.get_node_from_key(conn.physical_queue)
                     if node:
                         break
                 except Exception as e:
-                    logger.error('Error while getting node from key', extra={"e": e, "key": conn.key})
+                    logger.error('Error while getting node from key', extra={"e": e, "key": conn.physical_queue})
 
                 sleep(backoff[tries])
                 channel.client.nodes_manager.initialize()
@@ -186,7 +186,7 @@ class ClusterPoller(MultiChannelPoller):
         self._chan_to_sock[ident] = sock
         self._sock_to_fd[sock] = sock.fileno()
         self.poller.register(sock, self.eventflags)
-        logger.debug(f'registering to queue {conn.key}')
+        logger.debug(f'registering to queue {conn.physical_queue}')
 
     def _unregister(self, channel, client, conn, cmd):
         sock = self._chan_to_sock[(channel, client, conn, cmd)]
@@ -222,7 +222,7 @@ class ClusterPoller(MultiChannelPoller):
                 try:
                     self._register(*ident)
                 except Exception as e:
-                    logger.error('Error while registering BRPOP', extra={"e": e, "key": conn.key})
+                    logger.error('Error while registering BRPOP', extra={"e": e, "key": conn.physical_queue})
 
         channel._brpop_start()
 
@@ -252,7 +252,7 @@ class ClusterPoller(MultiChannelPoller):
         for queue_name, physical_queue in physical_queues.items():
             for physical_queue_name in physical_queue.alive_queues():
                 try:
-                    conn = next(x for x in conns if x.queue == queue_name and x.key == physical_queue_name)
+                    conn = next(x for x in conns if x.queue == queue_name and x.physical_queue == physical_queue_name)
                     conns.remove(conn)
                 except StopIteration:
                     conn = RedisNodeConnection(queue_name, physical_queue_name)
@@ -516,20 +516,20 @@ class Channel(RedisChannel):
         for queue, physical_queue in physical_queues.items():
             for physical_queue_name in physical_queue.alive_queues():
                 for _, _, conn, _ in self.connection.cycle._chan_to_sock:
-                    if conn.key == physical_queue_name and conn.in_poll == False:
+                    if conn.physical_queue == physical_queue_name and conn.in_poll == False:
                         conn.in_poll = True
-                        if conn.key in self.ask_errors:
-                            del self.ask_errors[conn.key]
+                        if conn.physical_queue in self.ask_errors:
+                            del self.ask_errors[conn.physical_queue]
                             try:
                                 conn.client.execute_command('ASKING')
                             except Exception as e:
-                                logger.warning('Error while sending ASKING', extra={"e": e, "key": conn.key})
+                                logger.warning('Error while sending ASKING', extra={"e": e, "key": conn.physical_queue})
                                 continue
                         try:
                             brpop_timeout = self.get_brpop_timeout(queue, physical_queue_name)
                             conn.client.connection.send_command('BRPOP', physical_queue_name, brpop_timeout)
                         except:
-                            logger.exception('Error while sending BRPOP', extra={"key": conn.key})
+                            logger.exception('Error while sending BRPOP', extra={"key": conn.physical_queue})
                             self.connection.cycle._unregister(self, self.client, conn, 'BRPOP')
                         break
 
@@ -542,9 +542,9 @@ class Channel(RedisChannel):
             # We should not throw error on this method to make kombu to continue operation
             raise Empty()
 
-        brpop_timeout = self.get_brpop_timeout(conn.queue, conn.key)
-        if self.should_listen(conn.queue, conn.key):
-            conn.client.connection.send_command('BRPOP', conn.key, brpop_timeout)  # schedule next BRPOP
+        brpop_timeout = self.get_brpop_timeout(conn.queue, conn.physical_queue)
+        if self.should_listen(conn.queue, conn.physical_queue):
+            conn.client.connection.send_command('BRPOP', conn.physical_queue, brpop_timeout)  # schedule next BRPOP
         else:
             self.connection.cycle._unregister(self, self.client, conn, 'BRPOP')
 
@@ -574,15 +574,15 @@ class Channel(RedisChannel):
         try:
             return conn.client.parse_response(conn.client.connection, cmd, **options)
         except Exception as e:
-            logger.error('Error while reading from Redis', extra={"e": e, "key": conn.key})
+            logger.error('Error while reading from Redis', extra={"e": e, "key": conn.physical_queue})
 
             # Mostly copied from https://github.com/sendbird/redis-py/blob/master/redis/cluster.py#L1173
             if isinstance(e, ConnectionError) or isinstance(e, TimeoutError):
                 try:
-                    node = channel.client.get_node_from_key(conn.key)
+                    node = channel.client.get_node_from_key(conn.physical_queue)
                     self.client.nodes_manager.startup_nodes.pop(node.name, None)
                 except Exception as e:
-                    logger.error('Error while removing node', extra={"e": e, "key": conn.key})
+                    logger.error('Error while removing node', extra={"e": e, "key": conn.physical_queue})
                 self.client.nodes_manager.initialize()
                 self.redis_configuration_changed()
             elif isinstance(e, MovedError):
@@ -611,7 +611,7 @@ class Channel(RedisChannel):
             raise
 
     def add_ask_error(self, e, conn):
-        self.ask_errors[conn.key] = e
+        self.ask_errors[conn.physical_queue] = e
 
 
 class Transport(RedisTransport):
