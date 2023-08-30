@@ -401,7 +401,10 @@ class Channel(RedisChannel):
         for slot, node in cluster_slots.items():
             name = f"{node['primary'][0]}:{node['primary'][1]}"
 
-            nodes[name] = RedisNodeConfiguration(name=name, slots={x for x in range(slot[0], slot[1] + 1)})
+            if name in nodes:
+                nodes[name].slots.update(range(slot[0], slot[1] + 1))
+            else:
+                nodes[name] = RedisNodeConfiguration(name=name, slots={x for x in range(slot[0], slot[1] + 1)})
 
         return nodes
 
