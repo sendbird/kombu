@@ -403,7 +403,11 @@ class Channel(RedisChannel):
             new_physical_queues = self.compute_physical_queue_names(remaining_queues)
             for queue in remaining_queues:
                 # Load queue names from redis to ensure listening physical queues before last redis slot configuration change.
-                cached_physical_queues = self.client.hgetall(self.physical_queue_cache_key.format(queue=queue))
+                try:
+                    cached_physical_queues = self.client.hgetall(self.physical_queue_cache_key.format(queue=queue))
+                except:
+                    logger.exception('Failed to get cache', extra={'queue': queue})
+                    cached_physical_queues = {}
 
                 # Merge cached and computed queue
                 # if cached_queue_names is not in new_physical_queues and has no expire, we should set its expiry
@@ -425,7 +429,10 @@ class Channel(RedisChannel):
                 # And update cache..
                 for queue_name, timeout in merged_physical_queues.items():
                     value = 0 if timeout is None else timeout
-                    self.client.hset(self.physical_queue_cache_key.format(queue=queue), queue_name, value)
+                    try:
+                        self.client.hset(self.physical_queue_cache_key.format(queue=queue), queue_name, value)
+                    except:
+                        logger.exception('Failed to set cache', extra={'queue': queue, 'queue_name': queue_name, 'value': value})
 
         return result
 
