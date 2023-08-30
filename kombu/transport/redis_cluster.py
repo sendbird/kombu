@@ -367,7 +367,7 @@ class Channel(RedisChannel):
 
         self.ask_errors = {}
         self.physical_queues = {}
-        self.physical_queues_updated_at = None
+        self.physical_queues_updated_at = 0
 
     def _restore(self, message, leftmost=False):
         if not self.ack_emulation:
@@ -402,7 +402,7 @@ class Channel(RedisChannel):
     def get_physical_queues(self, queues):
         now = time()
 
-        if self.physical_queues_updated_at and now - self.physical_queues_updated_at > 60:
+        if now - self.physical_queues_updated_at > 60:
             self.physical_queues = {}  # update physical queue configuration every minute
             self.physical_queues_updated_at = now
 
