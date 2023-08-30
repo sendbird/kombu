@@ -397,9 +397,11 @@ class Channel(RedisChannel):
         self.physical_queues = {}  # Will be recomputed later
 
     def get_physical_queues(self, queues):
-        if self.physical_queues_updated_at and time() - self.physical_queues_updated_at > 60:
+        now = time()
+
+        if self.physical_queues_updated_at and now - self.physical_queues_updated_at > 60:
             self.physical_queues = {}  # update physical queue configuration every minute
-            self.physical_queues_updated_at = time()
+            self.physical_queues_updated_at = now
 
         result = {k: v for k, v in self.physical_queues.items() if k in queues}
 
@@ -418,13 +420,18 @@ class Channel(RedisChannel):
                 # if cached_queue_names is not in new_physical_queues and has no expire, we should set its expiry
                 merged_physical_queues: Dict[str, Optional[int]] = {x: None for x in new_physical_queues[queue]}
 
-                for queue_name, timeout in cached_physical_queues.items():
+                for queue_name, expiry in cached_physical_queues.items():
                     queue_name = queue_name.decode('utf-8')
-                    timeout = int(timeout)
-                    if queue_name not in merged_physical_queues:
-                        if timeout == 0:
-                            timeout = int(time() + self.physical_queue_timeout)
-                        merged_physical_queues[queue_name] = timeout
+                    expiry = int(expiry)
+                    if expiry < now:
+                        try:
+                            self.client.hdel(self.physical_queue_cache_key.format(queue=queue), queue_name)
+                        except:
+                            logger.exception('Failed to delete cache', extra={'queue': queue, 'queue_name': queue_name})
+                    elif queue_name not in merged_physical_queues:
+                        if expiry == 0:
+                            expiry = int(now + self.physical_queue_timeout)
+                        merged_physical_queues[queue_name] = expiry
 
                 physical_queue = PhysicalQueue(merged_physical_queues)
 
