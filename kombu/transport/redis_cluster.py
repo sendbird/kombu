@@ -316,6 +316,9 @@ class RedisNodeConfiguration():
     def keyslot_in_node(self, keyslot: int) -> bool:
         return keyslot in self.slots
 
+    def __eq__(self, other):
+        return self.name == other.name and self.slots == other.slots
+
 
 # We create physical queue as a list on each redis cluster node to ensure even distribution.
 # On scale-in/out, we should listen to old queue names for a while to ensure no message is lost.
@@ -367,7 +370,8 @@ class Channel(RedisChannel):
 
         self.ask_errors = {}
         self.physical_queues = {}
-        self.physical_queues_updated_at = 0
+        self.redis_configuration_checked_at = 0
+        self.last_redis_configuration = self.get_redis_configuration()
 
     def _restore(self, message, leftmost=False):
         if not self.ack_emulation:
@@ -388,13 +392,27 @@ class Channel(RedisChannel):
     def get_redis_configuration(self) -> Dict[str, RedisNodeConfiguration]:
         nodes: Dict[str, RedisNodeConfiguration] = {}
 
-        for slot, node in self.client.nodes_manager.slots_cache.items():
-            found = nodes.get(node[0].name)
-            if found is None:
-                nodes[node[0].name] = RedisNodeConfiguration(name=node[0].name, slots={int(slot)})
-            else:
-                found.slots.add(int(slot))
+        try:
+            cluster_slots = self.client.cluster_slots()
+        except:
+            logger.exception("failed to get redis configuration")
+            return None
+
+        for slot, node in cluster_slots.items():
+            name = f"{node['primary'][0]}:{node['primary'][1]}"
+
+            nodes[name] = RedisNodeConfiguration(name=name, slots={x for x in range(slot[0], slot[1] + 1)})
+
         return nodes
+
+    def update_redis_configuration(self) -> bool:
+        last = self.last_redis_configuration
+        new = self.get_redis_configuration()
+
+        if new is not None and last != new:
+            self.last_redis_configuration = new
+            return True
+        return False
 
     def redis_configuration_changed(self):
         self.physical_queues = {}  # Will be recomputed later
@@ -402,9 +420,11 @@ class Channel(RedisChannel):
     def get_physical_queues(self, queues):
         now = time()
 
-        if now - self.physical_queues_updated_at > 60:
-            self.physical_queues = {}  # update physical queue configuration every minute
-            self.physical_queues_updated_at = now
+        # check redis configuration change every 10 seconds
+        if now - self.redis_configuration_checked_at > 10:
+            if self.update_redis_configuration():
+                self.physical_queues = {}
+            self.redis_configuration_checked_at = now
 
         result = {k: v for k, v in self.physical_queues.items() if k in queues}
 
