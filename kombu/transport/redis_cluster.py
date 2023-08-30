@@ -499,8 +499,8 @@ class Channel(RedisChannel):
         return result
 
     def _q_for_pri(self, queue, pri):
-        queues = self.get_physical_queues([queue])
-        queue = random.choice(queues[queue].current_queues())
+        physical_queues = self.get_physical_queues([queue])
+        queue = random.choice(physical_queues[queue].current_queues())
 
         pri = self.priority(pri)
         if pri:
