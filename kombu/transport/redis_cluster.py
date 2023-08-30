@@ -415,7 +415,8 @@ class Channel(RedisChannel):
         return False
 
     def redis_configuration_changed(self):
-        self.physical_queues = {}  # Will be recomputed later
+        self.physical_queues = {}
+        self.update_redis_configuration()
 
     def get_physical_queues(self, queues):
         now = time()
