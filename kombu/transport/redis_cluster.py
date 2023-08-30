@@ -495,7 +495,7 @@ class Channel(RedisChannel):
         return True
 
     def compute_physical_queue_names(self, queues):
-        redis_configuration = self.get_redis_configuration()
+        redis_configuration = self.last_redis_configuration
 
         queue_names_per_slot = self.connection.client.transport_options.get('queue_names_per_slot', None)
         if not queue_names_per_slot:
