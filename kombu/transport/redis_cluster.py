@@ -331,6 +331,9 @@ class PhysicalQueue():
 
         return [x for x in self.queues if self.queues[x] is None or self.queues[x] > now]
 
+    def current_queues(self) -> List[str]:
+        return [x for x in self.queues if self.queues[x] is None]
+
     def queue_expiry(self, queue) -> Optional[int]:
         return self.queues[queue]
 
@@ -497,7 +500,7 @@ class Channel(RedisChannel):
 
     def _q_for_pri(self, queue, pri):
         queues = self.get_physical_queues([queue])
-        queue = random.choice(queues[queue].alive_queues())
+        queue = random.choice(queues[queue].current_queues())
 
         pri = self.priority(pri)
         if pri:
