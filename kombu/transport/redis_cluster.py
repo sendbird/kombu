@@ -345,7 +345,7 @@ class Channel(RedisChannel):
     unacked_index_key = '_kombu.unacked_index.{{{queue}}}'
     unacked_mutex_key = '_kombu.unacked_mutex.{{{queue}}}'
     physical_queue_cache_key = '_kombu.physical_queue.{{{queue}}}'
-    physical_queue_timeout = 600000 # 10 minutes
+    physical_queue_timeout = 600 # 10 minutes
 
     min_priority = 0
     max_priority = 0
@@ -397,7 +397,7 @@ class Channel(RedisChannel):
         self.physical_queues = {}  # Will be recomputed later
 
     def get_physical_queues(self, queues):
-        if self.physical_queues_updated_at and time() - self.physical_queues_updated_at > 60000:
+        if self.physical_queues_updated_at and time() - self.physical_queues_updated_at > 60:
             self.physical_queues = {}  # update physical queue configuration every minute
             self.physical_queues_updated_at = time()
 
