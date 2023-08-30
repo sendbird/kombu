@@ -513,9 +513,9 @@ class Channel(RedisChannel):
             result[queue] = []
             if queue in queue_names_per_slot:
                 for node in redis_configuration.values():
-                    first_slot = next(iter(node.slots))
+                    last_slot = list(node.slots).pop()
 
-                    result[queue].append(queue_names_per_slot[queue][first_slot])
+                    result[queue].append(queue_names_per_slot[queue][last_slot])
             else:
                 logger.warning('no %s in queue_names_per_slot option, defaulting to single queue', queue)
                 result[queue] = [queue]
