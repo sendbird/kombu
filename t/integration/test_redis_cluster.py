@@ -63,15 +63,18 @@ def test_brpop_timeout():
 def test_connection_reuse(connection):
     from kombu.transport.redis_cluster import RedisClusterConnection
 
-    assert len(RedisClusterConnection.connections) == 0
+    assert len(RedisClusterConnection.producer_connections) == 0
+    assert len(RedisClusterConnection.consumer_connections) == 0
     with connection as conn:
         queue = conn.SimpleQueue('test_connectionerror')
         queue.put({'Hello': 'World'}, headers={'k1': 'v1'})
         _ = queue.get(timeout=1)
 
-        assert len(RedisClusterConnection.connections) == 1
+        assert len(RedisClusterConnection.producer_connections) == 1
+        assert len(RedisClusterConnection.consumer_connections) == 1
 
-    assert len(RedisClusterConnection.connections) == 0
+    assert len(RedisClusterConnection.producer_connections) == 0
+    assert len(RedisClusterConnection.consumer_connections) == 0
 
 
 def test_brpop_send_error(connection):
@@ -151,7 +154,7 @@ def test_movederror(connection):
                 pass
             except:
                 raise
-            assert conn.default_channel.client.reinitialize_counter != 0
+            assert conn.default_channel.consumer_client.reinitialize_counter != 0
 
 
 def test_askerror(connection):

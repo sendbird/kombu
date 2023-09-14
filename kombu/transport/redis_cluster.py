@@ -7,6 +7,7 @@ from kombu.log import get_logger
 from kombu.utils.encoding import bytes_to_str
 from kombu.utils.eventio import READ, ERR
 from kombu.utils.json import loads, dumps
+from kombu.utils.objects import cached_property
 
 from . import virtual
 from .redis import (
@@ -27,8 +28,15 @@ except ImportError:
 logger = get_logger(__name__)
 
 
-# Override this method to use other redis client
-def create_redis_cluster_connection(hostname, port, password, ssl):
+# Override these methods to use other redis client
+def create_redis_cluster_connection_for_consumer(hostname, port, password, ssl):
+    params = {'skip_full_coverage_check': True, 'host': hostname, 'port': port, 'password': password}
+    if ssl:
+        params['ssl'] = True
+
+    return redis.RedisCluster(**params)
+
+def create_redis_cluster_connection_for_producer(hostname, port, password, ssl):
     params = {'skip_full_coverage_check': True, 'host': hostname, 'port': port, 'password': password}
     if ssl:
         params['ssl'] = True
@@ -164,19 +172,19 @@ class ClusterPoller(MultiChannelPoller):
                 try:
                     if conn.key in channel.ask_errors:
                         ask_error = channel.ask_errors[conn.key]
-                        node = channel.client.get_node(ask_error.host, ask_error.port)
+                        node = channel.consumer_client.get_node(ask_error.host, ask_error.port)
                     else:
-                        node = channel.client.get_node_from_key(conn.key)
+                        node = channel.consumer_client.get_node_from_key(conn.key)
                     if node:
                         break
                 except Exception as e:
                     logger.error('Error while getting node from key', extra={"e": e, "key": conn.key})
 
                 sleep(backoff[tries])
-                channel.client.nodes_manager.initialize()
+                channel.consumer_client.nodes_manager.initialize()
                 tries += 1
 
-            redis_connection = channel.client.get_redis_connection(node)
+            redis_connection = channel.consumer_client.get_redis_connection(node)
             conn.client = redis_connection.client()
 
         sock = conn.client.connection._sock
@@ -213,7 +221,7 @@ class ClusterPoller(MultiChannelPoller):
         conns = self._get_conns_for_channel(channel)
 
         for conn in conns:
-            ident = (channel, channel.client, conn, 'BRPOP')
+            ident = (channel, channel.consumer_client, conn, 'BRPOP')
 
             if (ident not in self._chan_to_sock):
                 try:
@@ -273,22 +281,36 @@ class ClusterPoller(MultiChannelPoller):
 
 
 class RedisClusterConnection():
-    connections = {}
+    producer_connections = {}
+    consumer_connections = {}
     connection_to_key = {}
     refcounts = {}
 
     @classmethod
-    def get_connection(cls, host, port, password, ssl):
-        key = (host, port, password, ssl)
-        if key not in cls.connections:
-            connection = create_redis_cluster_connection(host, port, password, ssl)
-            cls.connections[key] = connection
+    def get_consumer_connection(cls, host, port, password, ssl):
+        key = (host, port, password, ssl, 'consumer')
+        if key not in cls.consumer_connections:
+            connection = create_redis_cluster_connection_for_consumer(host, port, password, ssl)
+            cls.consumer_connections[key] = connection
             cls.connection_to_key[connection] = key
             cls.refcounts[key] = 0
 
         cls.refcounts[key] += 1
 
-        return cls.connections[key]
+        return cls.consumer_connections[key]
+
+    @classmethod
+    def get_producer_connection(cls, host, port, password, ssl):
+        key = (host, port, password, ssl, 'producer')
+        if key not in cls.producer_connections:
+            connection = create_redis_cluster_connection_for_producer(host, port, password, ssl)
+            cls.producer_connections[key] = connection
+            cls.connection_to_key[connection] = key
+            cls.refcounts[key] = 0
+
+        cls.refcounts[key] += 1
+
+        return cls.producer_connections[key]
 
     @classmethod
     def close(cls, connection):
@@ -299,7 +321,10 @@ class RedisClusterConnection():
             connection.close()
             del cls.refcounts[key]
             del cls.connection_to_key[connection]
-            del cls.connections[key]
+            if key in cls.producer_connections:
+                del cls.producer_connections[key]
+            else:
+                del cls.consumer_connections[key]
 
 
 class Channel(RedisChannel):
@@ -326,6 +351,7 @@ class Channel(RedisChannel):
         super().__init__(conn, *args, **kwargs)
 
         self.ask_errors = {}
+        self.consumer_created = False
 
     def _restore(self, message, leftmost=False):
         if not self.ack_emulation:
@@ -350,7 +376,10 @@ class Channel(RedisChannel):
         else:
             yield self.client
 
-    def _create_client(self, asynchronous=False):
+    @cached_property
+    def consumer_client(self):
+        self.consumer_created = True
+
         conninfo = self.connection.client
 
         hostname = conninfo.hostname
@@ -359,12 +388,26 @@ class Channel(RedisChannel):
         transport = self.connection.client.transport_cls
         ssl = transport == 'rediss-cluster'
 
-        return RedisClusterConnection.get_connection(hostname, port, password, ssl)
+        return RedisClusterConnection.get_consumer_connection(hostname, port, password, ssl)
+
+    @cached_property
+    def client(self):
+        conninfo = self.connection.client
+
+        hostname = conninfo.hostname
+        port = conninfo.port
+        password = conninfo.password
+        transport = self.connection.client.transport_cls
+        ssl = transport == 'rediss-cluster'
+
+        return RedisClusterConnection.get_producer_connection(hostname, port, password, ssl)
 
     def close(self):
         super().close()
 
         RedisClusterConnection.close(self.client)
+        if self.consumer_created is True:
+            RedisClusterConnection.close(self.consumer_client)
 
     def _brpop_start(self, timeout):
         queues = self._queue_cycle.consume(len(self.active_queues))
@@ -388,7 +431,7 @@ class Channel(RedisChannel):
                         conn.client.connection.send_command('BRPOP', key, timeout)
                     except:
                         logger.exception('Error while sending BRPOP', extra={"key": conn.key})
-                        self.connection.cycle._unregister(self, self.client, conn, 'BRPOP')
+                        self.connection.cycle._unregister(self, self.consumer_client, conn, 'BRPOP')
                     break
 
     def _brpop_read(self, **options):
@@ -416,7 +459,7 @@ class Channel(RedisChannel):
             # Error is logged at `parse_response`
             pass
 
-        self.connection.cycle._unregister(self, self.client, conn, 'BRPOP')
+        self.connection.cycle._unregister(self, self.consumer_client, conn, 'BRPOP')
 
     def deliver_response(self, resp):
         dest, item = resp
@@ -433,31 +476,31 @@ class Channel(RedisChannel):
             # Mostly copied from https://github.com/sendbird/redis-py/blob/master/redis/cluster.py#L1173
             if isinstance(e, ConnectionError) or isinstance(e, TimeoutError):
                 try:
-                    node = channel.client.get_node_from_key(conn.key)
+                    node = channel.consumer_client.get_node_from_key(conn.key)
                     self.client.nodes_manager.startup_nodes.pop(node.name, None)
                 except Exception as e:
                     logger.error('Error while removing node', extra={"e": e, "key": conn.key})
-                self.client.nodes_manager.initialize()
+                self.consumer_client.nodes_manager.initialize()
             elif isinstance(e, MovedError):
-                self.client.reinitialize_counter += 1
-                if self.client._should_reinitialized():
-                    self.client.nodes_manager.initialize()
-                    self.client.reinitialize_counter = 0
+                self.consumer_client.reinitialize_counter += 1
+                if self.consumer_client._should_reinitialized():
+                    self.consumer_client.nodes_manager.initialize()
+                    self.consumer_client.reinitialize_counter = 0
                 else:
-                    self.client.nodes_manager.update_moved_exception(e)
+                    self.consumer_client.nodes_manager.update_moved_exception(e)
             elif isinstance(e, SlotNotCoveredError):
-                self.client.reinitialize_counter += 1
-                if self.client._should_reinitialized():
-                    self.client.nodes_manager.initialize()
-                    self.client.reinitialize_counter = 0
+                self.consumer_client.reinitialize_counter += 1
+                if self.consumer_client._should_reinitialized():
+                    self.consumer_client.nodes_manager.initialize()
+                    self.consumer_client.reinitialize_counter = 0
             elif isinstance(e, TryAgainError):
                 return  # try again in next BRPOP
             elif isinstance(e, AskError):
                 self.add_ask_error(e, conn)
             elif isinstance(e, ClusterDownError):
-                self.client.nodes_manager.initialize()
+                self.consumer_client.nodes_manager.initialize()
 
-            self.connection.cycle._unregister(self, self.client, conn, cmd)
+            self.connection.cycle._unregister(self, self.consumer_client, conn, cmd)
             raise
 
     def add_ask_error(self, e, conn):
