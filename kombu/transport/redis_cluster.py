@@ -28,7 +28,7 @@ except ImportError:
 logger = get_logger(__name__)
 
 
-# Override these methods to use other redis client
+# Override create_redis_cluster_connection_for_{producer,consumer} to use other redis client
 def create_redis_cluster_connection_for_consumer(hostname, port, password, ssl):
     params = {'skip_full_coverage_check': True, 'host': hostname, 'port': port, 'password': password}
     if ssl:
@@ -36,12 +36,8 @@ def create_redis_cluster_connection_for_consumer(hostname, port, password, ssl):
 
     return redis.RedisCluster(**params)
 
-def create_redis_cluster_connection_for_producer(hostname, port, password, ssl):
-    params = {'skip_full_coverage_check': True, 'host': hostname, 'port': port, 'password': password}
-    if ssl:
-        params['ssl'] = True
 
-    return redis.RedisCluster(**params)
+create_redis_cluster_connection_for_producer = create_redis_cluster_connection_for_consumer
 
 
 class QoS(RedisQoS):
