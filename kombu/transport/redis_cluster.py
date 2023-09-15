@@ -317,10 +317,12 @@ class RedisClusterConnection():
             connection.close()
             del cls.refcounts[key]
             del cls.connection_to_key[connection]
-            if key in cls.producer_connections:
+            if key[4] == 'producer':
                 del cls.producer_connections[key]
-            else:
+            elif key[4] == 'consumer':
                 del cls.consumer_connections[key]
+            else:
+                raise ValueError(f'Unknown connection type: {key[4]}')
 
 
 class Channel(RedisChannel):
