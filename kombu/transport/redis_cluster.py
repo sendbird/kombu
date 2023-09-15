@@ -30,7 +30,7 @@ logger = get_logger(__name__)
 
 # Override create_redis_cluster_connection_for_{producer,consumer} to use other redis client
 def create_redis_cluster_connection_for_consumer(hostname, port, password, ssl):
-    params = {'skip_full_coverage_check': True, 'host': hostname, 'port': port, 'password': password}
+    params = {'require_full_coverage': False, 'host': hostname, 'port': port, 'password': password, 'dynamic_startup_nodes': True}
     if ssl:
         params['ssl'] = True
 
