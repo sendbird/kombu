@@ -173,8 +173,8 @@ class ClusterPoller(MultiChannelPoller):
                         node = channel.consumer_client.get_node_from_key(conn.key)
                     if node:
                         break
-                except Exception as e:
-                    logger.error('Error while getting node from key', extra={"e": e, "key": conn.key})
+                except:
+                    logger.exception('Error while getting node from key', extra={"key": conn.key})
 
                 sleep(backoff[tries])
                 channel.consumer_client.nodes_manager.initialize()
@@ -222,8 +222,8 @@ class ClusterPoller(MultiChannelPoller):
             if (ident not in self._chan_to_sock):
                 try:
                     self._register(*ident)
-                except Exception as e:
-                    logger.error('Error while registering BRPOP', extra={"e": e, "key": conn.key})
+                except:
+                    logger.exception('Error while registering BRPOP', extra={"key": conn.key})
 
         timeout = channel.connection.client.transport_options.get('brpop_timeout', 1)
         channel._brpop_start(timeout)
@@ -421,8 +421,8 @@ class Channel(RedisChannel):
                         del self.ask_errors[conn.key]
                         try:
                             conn.client.execute_command('ASKING')
-                        except Exception as e:
-                            logger.warning('Error while sending ASKING', extra={"e": e, "key": conn.key})
+                        except:
+                            logger.exception('Error while sending ASKING', extra={"key": conn.key})
                             continue
 
                     try:
@@ -452,7 +452,7 @@ class Channel(RedisChannel):
             resp = self.parse_response(conn, 'BRPOP', **options)
             if resp:
                 self.deliver_response(resp)
-        except Exception:
+        except:
             # We should not throw error on this method to make kombu to continue operation
             # Error is logged at `parse_response`
             pass
@@ -469,15 +469,15 @@ class Channel(RedisChannel):
         try:
             return conn.client.parse_response(conn.client.connection, cmd, **options)
         except Exception as e:
-            logger.error('Error while reading from Redis', extra={"e": e, "key": conn.key})
+            logger.exception('Error while reading from Redis', extra={"key": conn.key})
 
             # Mostly copied from https://github.com/sendbird/redis-py/blob/master/redis/cluster.py#L1173
             if isinstance(e, ConnectionError) or isinstance(e, TimeoutError):
                 try:
                     node = channel.consumer_client.get_node_from_key(conn.key)
                     self.client.nodes_manager.startup_nodes.pop(node.name, None)
-                except Exception as e:
-                    logger.error('Error while removing node', extra={"e": e, "key": conn.key})
+                except:
+                    logger.exception('Error while removing node', extra={"key": conn.key})
                 self.consumer_client.nodes_manager.initialize()
             elif isinstance(e, MovedError):
                 self.consumer_client.reinitialize_counter += 1
