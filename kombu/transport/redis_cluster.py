@@ -314,7 +314,6 @@ class RedisClusterConnection():
 
         cls.refcounts[key] -= 1
         if cls.refcounts[key] == 0:
-            connection.close()
             del cls.refcounts[key]
             del cls.connection_to_key[connection]
             if key[4] == 'producer':
