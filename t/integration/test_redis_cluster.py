@@ -154,7 +154,7 @@ def test_movederror(connection):
                 pass
             except:
                 raise
-            assert conn.default_channel.consumer_client.reinitialize_counter != 0
+            assert conn.default_channel.consumer_clients[0].reinitialize_counter != 0
 
 
 def test_askerror(connection):
