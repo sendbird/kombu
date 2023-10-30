@@ -8,6 +8,7 @@ from kombu.utils.encoding import bytes_to_str
 from kombu.utils.eventio import READ, ERR
 from kombu.utils.json import loads, dumps
 from kombu.utils.objects import cached_property
+from kombu.utils.url import parse_url
 
 from . import virtual
 from .redis import (
@@ -382,25 +383,21 @@ class Channel(RedisChannel):
 
         conninfo = self.connection.client
 
-        hostname = conninfo.hostname
-        port = conninfo.port
-        password = conninfo.password
+        parsed = parse_url(conninfo.hostname)
         transport = self.connection.client.transport_cls
         ssl = transport == 'rediss-cluster'
 
-        return [RedisClusterConnection.get_consumer_connection(hostname, port, password, ssl)]
+        return [RedisClusterConnection.get_consumer_connection(parsed['hostname'], parsed['port'], parsed['password'], ssl)]
 
     @cached_property
     def client(self):
         conninfo = self.connection.client
 
-        hostname = conninfo.hostname
-        port = conninfo.port
-        password = conninfo.password
+        parsed = parse_url(conninfo.hostname)
         transport = self.connection.client.transport_cls
         ssl = transport == 'rediss-cluster'
 
-        return RedisClusterConnection.get_producer_connection(hostname, port, password, ssl)
+        return RedisClusterConnection.get_producer_connection(parsed['hostname'], parsed['port'], parsed['password'], ssl)
 
     def close(self):
         super().close()
@@ -514,6 +511,7 @@ class Transport(RedisTransport):
 
     driver_type = 'redis-cluster'
     driver_name = driver_type
+    can_parse_url = True
 
     implements = virtual.Transport.implements.extend(
         asynchronous=True, exchange_type=frozenset(['direct'])
