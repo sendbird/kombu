@@ -384,10 +384,20 @@ class Channel(RedisChannel):
         conninfo = self.connection.client
 
         parsed = parse_url(conninfo.hostname)
-        transport = self.connection.client.transport_cls
-        ssl = transport == 'rediss-cluster'
+        ssl = parsed['transport'] == 'rediss-cluster'
 
-        return [RedisClusterConnection.get_consumer_connection(parsed['hostname'], parsed['port'], parsed['password'], ssl)]
+        connection = RedisClusterConnection.get_consumer_connection(parsed['hostname'], parsed['port'], parsed['password'], ssl)
+
+        # Additional redis cluster
+        # redis-cluster://172.16.0.1:7000?alt=redis-cluster://172.16.0.2:7000
+        if 'alt' in parsed:
+            alt_parsed = parse_url(parsed['alt'])
+            alt_ssl = alt_parsed['transport'] == 'rediss-cluster'
+            alt_connection = RedisClusterConnection.get_consumer_connection(alt_parsed['hostname'], alt_parsed['port'], alt_parsed['password'], alt_ssl)
+
+            return [connection, alt_connection]
+
+        return [connection]
 
     @cached_property
     def client(self):
