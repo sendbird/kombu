@@ -423,24 +423,25 @@ class Channel(RedisChannel):
             return
 
         for key in queues:
-            for _, conn, _ in self.connection.cycle._chan_to_sock:
-                if conn.key == key and conn.in_poll == False:
-                    conn.in_poll = True
-                    conn.timeout = timeout
-                    if conn.key in self.ask_errors:
-                        del self.ask_errors[conn.key]
-                        try:
-                            conn.redis_connection.execute_command('ASKING')
-                        except:
-                            logger.exception('Error while sending ASKING', extra={"key": conn.key})
-                            continue
+            for client in self.consumer_clients:
+                for _, conn, _ in self.connection.cycle._chan_to_sock:
+                    if conn.key == key and conn.in_poll == False and conn.cluster_connection == client:
+                        conn.in_poll = True
+                        conn.timeout = timeout
+                        if conn.key in self.ask_errors:
+                            del self.ask_errors[conn.key]
+                            try:
+                                conn.redis_connection.execute_command('ASKING')
+                            except:
+                                logger.exception('Error while sending ASKING', extra={"key": conn.key})
+                                continue
 
-                    try:
-                        conn.redis_connection.connection.send_command('BRPOP', key, timeout)
-                    except:
-                        logger.exception('Error while sending BRPOP', extra={"key": conn.key})
-                        self.connection.cycle._unregister(self, conn, 'BRPOP')
-                    break
+                        try:
+                            conn.redis_connection.connection.send_command('BRPOP', key, timeout)
+                        except:
+                            logger.exception('Error while sending BRPOP', extra={"key": conn.key})
+                            self.connection.cycle._unregister(self, conn, 'BRPOP')
+                        break
 
     def _brpop_read(self, **options):
         conn = options.pop('conn')
