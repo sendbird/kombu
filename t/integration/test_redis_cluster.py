@@ -154,7 +154,7 @@ def test_movederror(connection):
                 pass
             except:
                 raise
-            assert conn.default_channel.consumer_client.reinitialize_counter != 0
+            assert conn.default_channel.consumer_clients[0].reinitialize_counter != 0
 
 
 def test_askerror(connection):
@@ -209,3 +209,39 @@ def test_many_queue(connection):
             assert message.content_encoding == 'utf-8'
             assert message.headers == {'k1': 'v1'}
             message.ack()
+
+
+def test_multiple_consume():
+    consumer_conn = kombu.Connection('redis-cluster://localhost:7000?alt=redis-cluster://localhost:8000')
+    producer_conn1 = kombu.Connection('redis-cluster://localhost:7000')
+    producer_conn2 = kombu.Connection('redis-cluster://localhost:8000')
+
+    with producer_conn1 as producer:
+        queue = producer.SimpleQueue('test_multiple_consume')
+        queue.put({'Hello': 'World'}, headers={'k1': 'v1'})
+        queue.close()
+
+    with consumer_conn as consumer:
+        queue = consumer.SimpleQueue('test_multiple_consume')
+        message = queue.get(timeout=10)
+        assert message.payload == {'Hello': 'World'}
+        assert message.content_type == 'application/json'
+        assert message.content_encoding == 'utf-8'
+        assert message.headers == {'k1': 'v1'}
+        message.ack()
+        queue.close()
+
+    with producer_conn2 as producer:
+        queue = producer.SimpleQueue('test_multiple_consume1')
+        queue.put({'Hello': 'World'}, headers={'k1': 'v1'})
+        queue.close()
+
+    with consumer_conn as consumer:
+        queue = consumer.SimpleQueue('test_multiple_consume1')
+        message = queue.get(timeout=10)
+        assert message.payload == {'Hello': 'World'}
+        assert message.content_type == 'application/json'
+        assert message.content_encoding == 'utf-8'
+        assert message.headers == {'k1': 'v1'}
+        message.ack()
+        queue.close()
