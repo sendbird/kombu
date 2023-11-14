@@ -3,3 +3,4 @@ case>=1.5.2
 pytest<=5.3.5
 pytest-sugar
 Pyro4
+setuptools>=65.5.1 # not directly required, pinned by Snyk to avoid a vulnerability
