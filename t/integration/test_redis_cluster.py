@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import os
 import queue
+import random
 
 import pytest
 import redis
 
-from case import patch
+from unittest.mock import patch
 
 from redis.exceptions import MovedError, AskError
 
@@ -245,3 +246,19 @@ def test_multiple_consume():
         assert message.headers == {'k1': 'v1'}
         message.ack()
         queue.close()
+
+def test_close_in_poll():
+    send_connection = kombu.Connection('redis-cluster://localhost:7000')
+    recv_connection = kombu.Connection('redis-cluster://localhost:7000')
+
+    queue_name = f"test_close_in_poll_{random.randint(0, 10000)}"
+    send_queue = send_connection.SimpleQueue(queue_name)
+    recv_queue = recv_connection.SimpleQueue(queue_name)
+    with pytest.raises(queue.Empty):
+        recv_queue.get(timeout=0.1)  # Register brpop
+
+    send_queue.put({'Hello': 'World'}, headers={'k1': 'v1'})
+    recv_connection.close() # Should receive pending message from brpop
+
+    message = recv_queue.get(timeout=0)
+    assert message.payload == {'Hello': 'World'}

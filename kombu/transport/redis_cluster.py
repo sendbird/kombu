@@ -410,6 +410,11 @@ class Channel(RedisChannel):
         return RedisClusterConnection.get_producer_connection(parsed['hostname'], parsed['port'], parsed['password'], ssl)
 
     def close(self):
+        if self.connection and self.connection.cycle:
+            for _, conn, _ in self.connection.cycle._chan_to_sock:
+                if conn.in_poll:
+                    self._brpop_read(conn=conn)
+
         super().close()
 
         RedisClusterConnection.close(self.client)
