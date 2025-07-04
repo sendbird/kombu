@@ -452,16 +452,17 @@ class Channel(RedisChannel):
         conn = options.pop('conn')
 
         try:
-            resp = self.parse_response(conn, 'BRPOP', **options)
-        except:
-            # We should not throw error on this method to make kombu to continue operation
-            raise Empty()
+            try:
+                resp = self.parse_response(conn, 'BRPOP', **options)
+            except:
+                # We should not throw error on this method to make kombu to continue operation
+                raise Empty()
 
-        conn.redis_connection.connection.send_command('BRPOP', conn.key, conn.timeout)  # schedule next BRPOP
-
-        if resp:
-            self.deliver_response(resp)
-            return True
+            if resp:
+                self.deliver_response(resp)
+                return True
+        finally:
+            conn.in_poll = False
 
     def _poll_error(self, cmd, conn, **options):
         try:
