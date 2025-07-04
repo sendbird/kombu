@@ -12,7 +12,6 @@ from unittest.mock import patch
 from redis.exceptions import MovedError, AskError
 
 import kombu
-from kombu.transport.redis_cluster import Transport
 
 from .common import (BasicFunctionality)
 
