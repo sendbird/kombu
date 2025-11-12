@@ -412,8 +412,15 @@ class Channel(RedisChannel):
     def close(self):
         if self.connection and self.connection.cycle:
             for _, conn, _ in self.connection.cycle._chan_to_sock:
-                if conn.in_poll:
+                if not conn.in_poll:
+                  continue
+
+                try:
                     self._brpop_read(conn=conn)
+                except Empty:
+                    pass
+                except:
+                    logger.exception('Error while closing channel', extra={"key": conn.key})
 
         super().close()
 
