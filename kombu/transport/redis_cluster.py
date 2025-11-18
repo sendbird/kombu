@@ -411,7 +411,8 @@ class Channel(RedisChannel):
 
     def close(self):
         if self.connection and self.connection.cycle:
-            for _, conn, _ in self.connection.cycle._chan_to_sock:
+
+            for _, conn, _ in list(self.connection.cycle._chan_to_sock.keys()):
                 if not conn.in_poll:
                   continue
 
