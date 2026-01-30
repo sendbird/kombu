@@ -348,11 +348,16 @@ class Channel(RedisChannel):
         'brpop_timeout'
     )
 
+    # Backoff settings for _brpop_read errors to prevent tight loop on broken connections
+    BRPOP_ERROR_BACKOFF_MIN = 0.1  # 100ms initial backoff
+    BRPOP_ERROR_BACKOFF_MAX = 5.0  # 5s max backoff
+
     def __init__(self, conn, *args, **kwargs):
         super().__init__(conn, *args, **kwargs)
 
         self.ask_errors = {}
         self.consumer_created = False
+        self._brpop_error_backoff = self.BRPOP_ERROR_BACKOFF_MIN
 
     def _restore(self, message, leftmost=False):
         if not self.ack_emulation:
@@ -449,8 +454,23 @@ class Channel(RedisChannel):
         try:
             resp = self.parse_response(conn, 'BRPOP', **options)
         except:
-            # We should not throw error on this method to make kombu to continue operation
+            # Apply exponential backoff to prevent tight loop on broken connections.
+            # Without this, a broken socket (always "readable") causes 100% CPU spin.
+            logger.warning(
+                'BRPOP read error, backing off %.1fs before retry',
+                self._brpop_error_backoff,
+                extra={"key": conn.key},
+            )
+            sleep(self._brpop_error_backoff)
+            # Exponential backoff: double each time, up to max
+            self._brpop_error_backoff = min(
+                self._brpop_error_backoff * 2,
+                self.BRPOP_ERROR_BACKOFF_MAX,
+            )
             raise Empty()
+
+        # Success: reset backoff
+        self._brpop_error_backoff = self.BRPOP_ERROR_BACKOFF_MIN
 
         conn.redis_connection.connection.send_command('BRPOP', conn.key, conn.timeout)  # schedule next BRPOP
 
