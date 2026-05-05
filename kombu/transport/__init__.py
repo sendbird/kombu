@@ -28,6 +28,8 @@ TRANSPORT_ALIASES = {
     'memory': 'kombu.transport.memory:Transport',
     'redis': 'kombu.transport.redis:Transport',
     'rediss': 'kombu.transport.redis:Transport',
+    'redis-cluster': 'kombu.transport.redis_cluster:Transport',
+    'rediss-cluster': 'kombu.transport.redis_cluster:Transport',
     'SQS': 'kombu.transport.SQS:Transport',
     'sqs': 'kombu.transport.SQS:Transport',
     'mongodb': 'kombu.transport.mongodb:Transport',
