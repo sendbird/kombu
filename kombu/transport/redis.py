@@ -49,6 +49,8 @@ Transport Options
 * ``health_check_interval``
 * ``retry_on_timeout``
 * ``priority_steps``
+* ``queue_pop_strategy``: Queue pop strategy, either ``rpop`` or ``brpop``.
+* ``polling_interval``: Seconds to sleep between empty RPOP scans.
 """
 
 from __future__ import annotations
@@ -61,7 +63,7 @@ from collections import namedtuple
 from contextlib import contextmanager
 from importlib.metadata import version
 from queue import Empty
-from time import time
+from time import monotonic, sleep, time
 
 from packaging.version import Version
 from vine import promise
@@ -477,6 +479,7 @@ class MultiChannelPoller:
         self.poller = poll()
         # one-shot callbacks called after reading from socket.
         self.after_read = set()
+        self._next_queue_poll_at = 0
 
     def close(self):
         for fd in self._chan_to_sock.values():
@@ -531,6 +534,13 @@ class MultiChannelPoller:
         if not channel._in_poll:  # send BRPOP
             channel._brpop_start()
 
+    def _consume_from_active_queues(self, channel):
+        """Consume one message with non-blocking RPOP calls."""
+        try:
+            return channel._rpop_from_active_queues()
+        except Empty:
+            return False
+
     def _register_LISTEN(self, channel):
         """Enable LISTEN mode for channel."""
         if not self._client_registered(channel, channel.subclient, 'LISTEN'):
@@ -539,13 +549,31 @@ class MultiChannelPoller:
         if not channel._in_listen:
             channel._subscribe()  # send SUBSCRIBE
 
-    def on_poll_start(self):
+    def on_poll_start(self, polling_interval=None):
+        poll_queues = True
+        rpop_polled = False
+        rpop_delivered = False
+        if polling_interval is not None:
+            now = monotonic()
+            poll_queues = now >= self._next_queue_poll_at
+
         for channel in self._channels:
-            if channel.active_queues:           # BRPOP mode?
+            if channel.active_queues:
                 if channel.qos.can_consume():
-                    self._register_BRPOP(channel)
+                    if channel._get_queue_pop_strategy() == 'brpop':
+                        self._register_BRPOP(channel)
+                    elif poll_queues:
+                        rpop_polled = True
+                        rpop_delivered = (
+                            self._consume_from_active_queues(channel) or
+                            rpop_delivered
+                        )
             if channel.active_fanout_queues:    # LISTEN mode?
                 self._register_LISTEN(channel)
+
+        if (polling_interval is not None and poll_queues and rpop_polled and
+                not rpop_delivered):
+            self._next_queue_poll_at = now + polling_interval
 
     def on_poll_init(self, poller):
         self.poller = poller
@@ -585,14 +613,20 @@ class MultiChannelPoller:
     def get(self, callback, timeout=None):
         self._in_protected_read = True
         try:
+            has_rpop_queue_consumers = False
             for channel in self._channels:
-                if channel.active_queues:           # BRPOP mode?
+                if channel.active_queues:
                     if channel.qos.can_consume():
-                        self._register_BRPOP(channel)
+                        if channel._get_queue_pop_strategy() == 'brpop':
+                            self._register_BRPOP(channel)
+                        else:
+                            has_rpop_queue_consumers = True
+                            if self._consume_from_active_queues(channel):
+                                return
                 if channel.active_fanout_queues:    # LISTEN mode?
                     self._register_LISTEN(channel)
 
-            events = self.poller.poll(timeout)
+            events = self.poller.poll(0 if has_rpop_queue_consumers else timeout)
             if events:
                 for fileno, event in events:
                     ret = self.handle_event(fileno, event)
@@ -694,6 +728,11 @@ class Channel(virtual.Channel):
     #: The default is to consume from queues in round robin.
     queue_order_strategy = 'round_robin'
 
+    #: Command strategy used by consumers for active queues.
+    #: ``rpop`` is non-blocking and safe behind Redis multiplexing proxies.
+    #: ``brpop`` keeps the legacy blocking path available as a fallback.
+    queue_pop_strategy = 'rpop'
+
     _async_pool = None
     _pool = None
 
@@ -718,7 +757,8 @@ class Channel(virtual.Channel):
          'max_connections',
          'health_check_interval',
          'retry_on_timeout',
-         'priority_steps')  # <-- do not add comma here!
+         'priority_steps',
+         'queue_pop_strategy')  # <-- do not add comma here!
     )
 
     connection_class = redis.Connection if redis else None
@@ -836,10 +876,9 @@ class Channel(virtual.Channel):
         # each queue is equally likely to be consumed from,
         # so that a very busy queue will not block others.
         #
-        # This works by using Redis's `BRPOP` command and
-        # by rotating the most recently used queue to the
-        # and of the list.  See Kombu github issue #166 for
-        # more discussion of this method.
+        # Both queue pop strategies rotate the most recently used queue to the
+        # end of the list so each queue gets a fair chance. See Kombu github
+        # issue #166 for more discussion of this method.
         self._update_queue_cycle()
         return ret
 
@@ -954,6 +993,17 @@ class Channel(virtual.Channel):
                         message, self._fanout_to_queue[exchange])
                     return True
 
+    def _get_queue_pop_strategy(self):
+        strategy = self.connection.client.transport_options.get(
+            'queue_pop_strategy',
+            self.queue_pop_strategy,
+        )
+        if strategy not in {'brpop', 'rpop'}:
+            raise ValueError(
+                'queue_pop_strategy must be either "brpop" or "rpop"'
+            )
+        return strategy
+
     def _brpop_start(self, timeout=1):
         queues = self._queue_cycle.consume(len(self.active_queues))
         if not queues:
@@ -989,6 +1039,30 @@ class Channel(virtual.Channel):
                 raise Empty()
         finally:
             self._in_poll = None
+
+    def _rpop_from_active_queues(self):
+        queues = self._queue_cycle.consume(len(self.active_queues))
+        if not queues:
+            raise Empty()
+
+        try:
+            for pri in self.priority_steps:
+                for queue in queues:
+                    item = self.client.rpop(self._q_for_pri(queue, pri))
+                    if item:
+                        self._queue_cycle.rotate(queue)
+                        self.connection._deliver(
+                            loads(bytes_to_str(item)), queue,
+                        )
+                        return True
+        except self.connection_errors:
+            # if there's a ConnectionError, disconnect so the next
+            # iteration will reconnect automatically.
+            connection = getattr(self.client, 'connection', None)
+            if connection is not None:
+                connection.disconnect()
+            raise
+        raise Empty()
 
     def _poll_error(self, type, **options):
         if type == 'LISTEN':
@@ -1268,7 +1342,7 @@ class Channel(virtual.Channel):
 
     @cached_property
     def client(self):
-        """Client used to publish messages, BRPOP etc."""
+        """Client used to publish and consume messages."""
         return self._create_client(asynchronous=True)
 
     @cached_property
@@ -1296,7 +1370,7 @@ class Transport(virtual.Transport):
 
     Channel = Channel
 
-    polling_interval = None  # disable sleep between unsuccessful polls.
+    polling_interval = 1.0
     default_port = DEFAULT_PORT
     driver_type = 'redis'
     driver_name = 'redis'
@@ -1320,10 +1394,51 @@ class Transport(virtual.Transport):
     def driver_version(self):
         return redis.__version__
 
+    def _get_queue_pop_strategy(self, transport_options=None):
+        if transport_options is None:
+            transport_options = self.client.transport_options
+        strategy = transport_options.get(
+            'queue_pop_strategy',
+            self.Channel.queue_pop_strategy,
+        )
+        if strategy not in {'brpop', 'rpop'}:
+            raise ValueError(
+                'queue_pop_strategy must be either "brpop" or "rpop"'
+            )
+        return strategy
+
+    def drain_events(self, connection, timeout=None):
+        time_start = monotonic()
+        get = self.cycle.get
+        polling_interval = (
+            self.polling_interval
+            if self._get_queue_pop_strategy() == 'rpop' else None
+        )
+        if timeout and polling_interval and polling_interval > timeout:
+            polling_interval = timeout
+        while 1:
+            try:
+                get(self._deliver, timeout=timeout)
+            except Empty:
+                if timeout is not None and monotonic() - time_start >= timeout:
+                    raise socket.timeout()
+                if polling_interval is not None:
+                    sleep(polling_interval)
+            else:
+                break
+
     def register_with_event_loop(self, connection, loop):
         cycle = self.cycle
         cycle.on_poll_init(loop.poller)
         cycle_poll_start = cycle.on_poll_start
+        polling_interval = connection.client.transport_options.get(
+            'polling_interval',
+            self.polling_interval,
+        )
+        if self._get_queue_pop_strategy(
+            connection.client.transport_options,
+        ) == 'brpop':
+            polling_interval = None
         add_reader = loop.add_reader
         on_readable = self.on_readable
 
@@ -1341,7 +1456,7 @@ class Transport(virtual.Transport):
         cycle._on_connection_disconnect = _on_disconnect
 
         def on_poll_start():
-            cycle_poll_start()
+            cycle_poll_start(polling_interval)
             [add_reader(fd, on_readable, fd) for fd in cycle.fds]
         loop.on_tick.add(on_poll_start)
         loop.call_repeatedly(10, cycle.maybe_restore_messages)

@@ -131,8 +131,26 @@ class Client:
     def smembers(self, key):
         return self.sets.get(key, set())
 
+    def zrevrangebyscore(self, *args, **kwargs):
+        return []
+
     def ping(self, *args, **kwargs):
         return True
+
+    def lock(self, *args, **kwargs):
+        class Lock:
+            class Local:
+                token = 'token'
+
+            local = Local()
+
+            def acquire(self, blocking=False):
+                return True
+
+            def release(self):
+                pass
+
+        return Lock()
 
     def srem(self, key, *args):
         self.sets.pop(key, None)
@@ -782,8 +800,27 @@ class test_Channel:
             'data': 'data',
         }
 
-    def test_brpop_start_but_no_queues(self):
-        assert self.channel._brpop_start() is None
+    def test_rpop_from_active_queues_but_no_queues(self):
+        with pytest.raises(redis.Empty):
+            self.channel._rpop_from_active_queues()
+
+    def test_queue_pop_strategy_defaults_to_rpop(self):
+        assert self.channel._get_queue_pop_strategy() == 'rpop'
+
+    def test_queue_pop_strategy_can_use_brpop(self):
+        conn = self.create_connection(transport_options={
+            'fanout_patterns': True,
+            'queue_pop_strategy': 'brpop',
+        })
+        assert conn.default_channel._get_queue_pop_strategy() == 'brpop'
+
+    def test_queue_pop_strategy_rejects_invalid_values(self):
+        conn = self.create_connection(transport_options={
+            'fanout_patterns': True,
+            'queue_pop_strategy': 'invalid',
+        })
+        with pytest.raises(ValueError):
+            conn.default_channel._get_queue_pop_strategy()
 
     def test_receive(self):
         s = self.channel.subclient = Mock()
@@ -867,6 +904,45 @@ class test_Channel:
         c.parse_response.side_effect = KeyError('foo')
         with pytest.raises(KeyError):
             self.channel._poll_error('BRPOP')
+
+    def test_rpop_from_active_queues_raises(self):
+        c = self.channel.client = Mock()
+        c.rpop.side_effect = KeyError('foo')
+        self.channel._active_queues = ['foo']
+        self.channel._update_queue_cycle()
+
+        with pytest.raises(KeyError):
+            self.channel._rpop_from_active_queues()
+
+        c.connection.disconnect.assert_called_with()
+
+    def test_rpop_from_active_queues_gives_None(self):
+        c = self.channel.client = Mock()
+        c.rpop.return_value = None
+        self.channel._active_queues = ['foo']
+        self.channel._update_queue_cycle()
+
+        with pytest.raises(redis.Empty):
+            self.channel._rpop_from_active_queues()
+
+    def test_rpop_from_active_queues_delivers(self):
+        message = {
+            'body': 'hello',
+            'properties': {
+                'delivery_tag': 1,
+                'delivery_info': {'exchange': 'E', 'routing_key': 'R'},
+            },
+        }
+        self.channel._new_queue('foo')
+        self.channel._put('foo', message)
+        self.channel._active_queues = ['foo']
+        self.channel._update_queue_cycle()
+        self.channel.connection._deliver = Mock(name='_deliver')
+
+        assert self.channel._rpop_from_active_queues()
+        self.channel.connection._deliver.assert_called_once_with(
+            message, 'foo',
+        )
 
     def test_poll_error_on_type_LISTEN(self):
         c = self.channel.subclient = Mock()
@@ -1064,7 +1140,7 @@ class test_Channel:
     def test_register_with_event_loop(self):
         transport = self.connection.transport
         transport.cycle = Mock(name='cycle')
-        transport.cycle.fds = {12: 'LISTEN', 13: 'BRPOP'}
+        transport.cycle.fds = {12: 'LISTEN'}
         conn = Mock(name='conn')
         conn.client = Mock(name='client', transport_options={})
         loop = Mock(name='loop')
@@ -1078,13 +1154,12 @@ class test_Channel:
         on_poll_start = loop.on_tick.add.call_args[0][0]
 
         on_poll_start()
-        transport.cycle.on_poll_start.assert_called_with()
+        transport.cycle.on_poll_start.assert_called_with(1.0)
         loop.add_reader.assert_has_calls([
             call(12, transport.on_readable, 12),
-            call(13, transport.on_readable, 13),
         ])
 
-    @pytest.mark.parametrize('fds', [{12: 'LISTEN', 13: 'BRPOP'}, {}])
+    @pytest.mark.parametrize('fds', [{12: 'LISTEN'}, {}])
     def test_register_with_event_loop__on_disconnect__loop_cleanup(self, fds):
         """Ensure event loop polling stops on disconnect (if started)."""
         transport = self.connection.transport
@@ -1107,7 +1182,7 @@ class test_Channel:
     def test_configurable_health_check(self):
         transport = self.connection.transport
         transport.cycle = Mock(name='cycle')
-        transport.cycle.fds = {12: 'LISTEN', 13: 'BRPOP'}
+        transport.cycle.fds = {12: 'LISTEN'}
         conn = Mock(name='conn')
         conn.client = Mock(name='client', transport_options={
             'health_check_interval': 15,
@@ -1123,11 +1198,70 @@ class test_Channel:
         on_poll_start = loop.on_tick.add.call_args[0][0]
 
         on_poll_start()
-        transport.cycle.on_poll_start.assert_called_with()
+        transport.cycle.on_poll_start.assert_called_with(1.0)
+        loop.add_reader.assert_has_calls([
+            call(12, transport.on_readable, 12),
+        ])
+
+    def test_configurable_polling_interval_in_event_loop(self):
+        transport = self.connection.transport
+        transport.cycle = Mock(name='cycle')
+        transport.cycle.fds = {}
+        conn = Mock(name='conn')
+        conn.client = Mock(name='client', transport_options={
+            'polling_interval': 0.25,
+        })
+        loop = Mock(name='loop')
+        redis.Transport.register_with_event_loop(transport, conn, loop)
+        on_poll_start = loop.on_tick.add.call_args[0][0]
+
+        on_poll_start()
+
+        transport.cycle.on_poll_start.assert_called_with(0.25)
+
+    def test_brpop_strategy_disables_event_loop_queue_throttle(self):
+        transport = self.connection.transport
+        transport.cycle = Mock(name='cycle')
+        transport.cycle.fds = {12: 'LISTEN', 13: 'BRPOP'}
+        conn = Mock(name='conn')
+        conn.client = Mock(name='client', transport_options={
+            'queue_pop_strategy': 'brpop',
+        })
+        loop = Mock(name='loop')
+        redis.Transport.register_with_event_loop(transport, conn, loop)
+        on_poll_start = loop.on_tick.add.call_args[0][0]
+
+        on_poll_start()
+
+        transport.cycle.on_poll_start.assert_called_with(None)
         loop.add_reader.assert_has_calls([
             call(12, transport.on_readable, 12),
             call(13, transport.on_readable, 13),
         ])
+
+    def test_rpop_drain_events_uses_polling_interval(self):
+        transport = self.connection.transport
+        transport.cycle = Mock(name='cycle')
+        transport.cycle.get.side_effect = [redis.Empty(), None]
+
+        with patch('kombu.transport.redis.sleep') as sleep:
+            transport.drain_events(self.connection)
+
+        sleep.assert_called_once_with(1.0)
+
+    def test_brpop_drain_events_does_not_sleep_after_empty(self):
+        conn = self.create_connection(transport_options={
+            'fanout_patterns': True,
+            'queue_pop_strategy': 'brpop',
+        })
+        transport = conn.transport
+        transport.cycle = Mock(name='cycle')
+        transport.cycle.get.side_effect = [redis.Empty(), None]
+
+        with patch('kombu.transport.redis.sleep') as sleep:
+            transport.drain_events(conn)
+
+        sleep.assert_not_called()
 
     def test_transport_on_readable(self):
         transport = self.connection.transport
@@ -1452,7 +1586,16 @@ class test_Redis:
         assert conn1.disconnected
         assert conn2.disconnected
 
-    def test_close_in_poll(self):
+    def test_close_does_not_drain_pending_pop_response(self):
+        c = Connection(transport=Transport).channel()
+        conn1 = c.client.connection
+        c.client.parse_response = Mock()
+        c._in_poll = None
+        c.close()
+        assert conn1.disconnected
+        c.client.parse_response.assert_not_called()
+
+    def test_close_drains_pending_brpop_response(self):
         c = Connection(transport=Transport).channel()
         conn1 = c.client.connection
         conn1._sock.data = [('BRPOP', ('test_Redis',))]
@@ -1496,6 +1639,7 @@ class test_MultiChannelPoller:
         p._channels = []
         p.on_poll_start()
         p._register_BRPOP = Mock(name='_register_BRPOP')
+        p._consume_from_active_queues = Mock(name='_consume_from_active_queues')
         p._register_LISTEN = Mock(name='_register_LISTEN')
 
         chan1 = Mock(name='chan1')
@@ -1507,17 +1651,70 @@ class test_MultiChannelPoller:
         chan1.active_queues = ['q1']
         chan1.active_fanout_queues = ['q2']
         chan1.qos.can_consume.return_value = False
+        chan1._get_queue_pop_strategy.return_value = 'rpop'
 
         p.on_poll_start()
         p._register_LISTEN.assert_called_with(chan1)
+        p._consume_from_active_queues.assert_not_called()
         p._register_BRPOP.assert_not_called()
 
         chan1.qos.can_consume.return_value = True
         p._register_LISTEN.reset_mock()
         p.on_poll_start()
 
-        p._register_BRPOP.assert_called_with(chan1)
+        p._consume_from_active_queues.assert_called_with(chan1)
         p._register_LISTEN.assert_called_with(chan1)
+        p._register_BRPOP.assert_not_called()
+
+        p._consume_from_active_queues.reset_mock()
+        p._register_BRPOP.reset_mock()
+        chan1._get_queue_pop_strategy.return_value = 'brpop'
+        p.on_poll_start()
+
+        p._register_BRPOP.assert_called_with(chan1)
+        p._consume_from_active_queues.assert_not_called()
+
+    def test_on_poll_start_throttles_empty_queue_polling(self):
+        p = self.Poller()
+        p._consume_from_active_queues = Mock(
+            name='_consume_from_active_queues',
+            return_value=False,
+        )
+        chan1 = Mock(name='chan1')
+        p._channels = [chan1]
+        chan1.active_queues = ['q1']
+        chan1.active_fanout_queues = []
+        chan1.qos.can_consume.return_value = True
+        chan1._get_queue_pop_strategy.return_value = 'rpop'
+
+        with patch('kombu.transport.redis.monotonic',
+                   side_effect=[10.0, 10.5, 11.0]):
+            p.on_poll_start(polling_interval=1.0)
+            p.on_poll_start(polling_interval=1.0)
+            p.on_poll_start(polling_interval=1.0)
+
+        assert p._consume_from_active_queues.call_count == 2
+
+    def test_on_poll_start_does_not_throttle_after_delivery(self):
+        p = self.Poller()
+        p._consume_from_active_queues = Mock(
+            name='_consume_from_active_queues',
+            return_value=True,
+        )
+        chan1 = Mock(name='chan1')
+        p._channels = [chan1]
+        chan1.active_queues = ['q1']
+        chan1.active_fanout_queues = []
+        chan1.qos.can_consume.return_value = True
+        chan1._get_queue_pop_strategy.return_value = 'rpop'
+
+        with patch('kombu.transport.redis.monotonic',
+                   side_effect=[10.0, 10.5, 10.9]):
+            p.on_poll_start(polling_interval=1.0)
+            p.on_poll_start(polling_interval=1.0)
+            p.on_poll_start(polling_interval=1.0)
+
+        assert p._consume_from_active_queues.call_count == 3
 
     def test_on_poll_init(self):
         p = self.Poller()
@@ -1536,19 +1733,19 @@ class test_MultiChannelPoller:
     def test_handle_event(self):
         p = self.Poller()
         chan = Mock(name='chan')
-        p._fd_to_chan[13] = chan, 'BRPOP'
-        chan.handlers = {'BRPOP': Mock(name='BRPOP')}
+        p._fd_to_chan[13] = chan, 'LISTEN'
+        chan.handlers = {'LISTEN': Mock(name='LISTEN')}
 
         chan.qos.can_consume.return_value = False
         p.handle_event(13, redis.READ)
-        chan.handlers['BRPOP'].assert_not_called()
+        chan.handlers['LISTEN'].assert_not_called()
 
         chan.qos.can_consume.return_value = True
         p.handle_event(13, redis.READ)
-        chan.handlers['BRPOP'].assert_called_with()
+        chan.handlers['LISTEN'].assert_called_with()
 
         p.handle_event(13, redis.ERR)
-        chan._poll_error.assert_called_with('BRPOP')
+        chan._poll_error.assert_called_with('LISTEN')
 
         p.handle_event(13, ~(redis.READ | redis.ERR))
 
@@ -1619,6 +1816,17 @@ class test_MultiChannelPoller:
         p._register(channel, client, type)
         client.connection.connect.assert_called_with()
 
+    def test_consume_from_active_queues(self):
+        p = self.Poller()
+        channel = Mock()
+
+        assert p._consume_from_active_queues(channel) == (
+            channel._rpop_from_active_queues.return_value
+        )
+
+        channel._rpop_from_active_queues.side_effect = redis.Empty()
+        assert not p._consume_from_active_queues(channel)
+
     def test_register_BRPOP(self):
         p = self.Poller()
         channel = Mock()
@@ -1664,6 +1872,7 @@ class test_MultiChannelPoller:
         p.poller = Mock()
         p.poller.poll.return_value = _pr
 
+        p._consume_from_active_queues = Mock(return_value=False)
         p._register_BRPOP = Mock()
         p._register_LISTEN = Mock()
 
@@ -1671,6 +1880,7 @@ class test_MultiChannelPoller:
         p._channels = [channel]
         channel.active_queues = _aq
         channel.active_fanout_queues = _af
+        channel._get_queue_pop_strategy.return_value = 'rpop'
 
         return p, channel
 
@@ -1694,23 +1904,59 @@ class test_MultiChannelPoller:
         qos.reject(1234, True)
         qos.restore_by_tag.assert_called_with(1234, leftmost=True)
 
-    def test_get_brpop_qos_allow(self):
+    def test_get_rpop_qos_allow(self):
         p, channel = self.create_get(queues=['a_queue'])
         channel.qos.can_consume.return_value = True
 
         with pytest.raises(redis.Empty):
             p.get(Mock())
 
-        p._register_BRPOP.assert_called_with(channel)
+        p._consume_from_active_queues.assert_called_with(channel)
+        p._register_BRPOP.assert_not_called()
+        p.poller.poll.assert_called_with(0)
 
-    def test_get_brpop_qos_disallow(self):
+    def test_get_rpop_returns_without_polling_when_message_delivered(self):
+        p, channel = self.create_get(queues=['a_queue'])
+        channel.qos.can_consume.return_value = True
+        p._consume_from_active_queues.return_value = True
+
+        p.get(Mock())
+
+        p._consume_from_active_queues.assert_called_with(channel)
+        p.poller.poll.assert_not_called()
+
+    def test_get_rpop_qos_disallow(self):
         p, channel = self.create_get(queues=['a_queue'])
         channel.qos.can_consume.return_value = False
 
         with pytest.raises(redis.Empty):
             p.get(Mock())
 
+        p._consume_from_active_queues.assert_not_called()
         p._register_BRPOP.assert_not_called()
+
+    def test_get_brpop_qos_allow(self):
+        p, channel = self.create_get(queues=['a_queue'])
+        channel.qos.can_consume.return_value = True
+        channel._get_queue_pop_strategy.return_value = 'brpop'
+
+        with pytest.raises(redis.Empty):
+            p.get(Mock())
+
+        p._register_BRPOP.assert_called_with(channel)
+        p._consume_from_active_queues.assert_not_called()
+        p.poller.poll.assert_called_with(None)
+
+    def test_get_brpop_qos_disallow(self):
+        p, channel = self.create_get(queues=['a_queue'])
+        channel.qos.can_consume.return_value = False
+        channel._get_queue_pop_strategy.return_value = 'brpop'
+
+        with pytest.raises(redis.Empty):
+            p.get(Mock())
+
+        p._register_BRPOP.assert_not_called()
+        p._consume_from_active_queues.assert_not_called()
 
     def test_get_listen(self):
         p, channel = self.create_get(fanouts=['f_queue'])
@@ -1722,22 +1968,22 @@ class test_MultiChannelPoller:
 
     def test_get_receives_ERR(self):
         p, channel = self.create_get(events=[(1, eventio.ERR)])
-        p._fd_to_chan[1] = (channel, 'BRPOP')
+        p._fd_to_chan[1] = (channel, 'LISTEN')
 
         with pytest.raises(redis.Empty):
             p.get(Mock())
 
-        channel._poll_error.assert_called_with('BRPOP')
+        channel._poll_error.assert_called_with('LISTEN')
 
     def test_get_receives_multiple(self):
         p, channel = self.create_get(events=[(1, eventio.ERR),
                                              (1, eventio.ERR)])
-        p._fd_to_chan[1] = (channel, 'BRPOP')
+        p._fd_to_chan[1] = (channel, 'LISTEN')
 
         with pytest.raises(redis.Empty):
             p.get(Mock())
 
-        channel._poll_error.assert_called_with('BRPOP')
+        channel._poll_error.assert_called_with('LISTEN')
 
 
 class test_Mutex:
