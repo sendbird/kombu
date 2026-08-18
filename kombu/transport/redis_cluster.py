@@ -520,7 +520,7 @@ class Channel(RedisChannel):
                     logger.exception('Error while removing node', extra={"key": conn.key})
                 try:
                     nodes_manager.initialize()
-                except:
+                except Exception:
                     # Unguarded, this masks the original error with a
                     # RedisClusterException AND skips the _unregister below, so
                     # the caller sees the wrong failure and the dead connection

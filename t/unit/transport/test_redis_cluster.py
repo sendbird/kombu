@@ -10,8 +10,6 @@ from unittest.mock import Mock
 
 import pytest
 
-from kombu.transport.redis_cluster import Channel
-
 pytest.importorskip('redis')
 
 from redis.exceptions import (  # noqa: E402
@@ -19,6 +17,8 @@ from redis.exceptions import (  # noqa: E402
     RedisClusterException,
     TimeoutError,
 )
+
+from kombu.transport.redis_cluster import Channel  # noqa: E402
 
 
 class _NodesManager:
