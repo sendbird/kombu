@@ -1,0 +1,74 @@
+# Unit tests for the Sendbird-only redis_cluster transport.
+#
+# Why this exists as a separate workflow:
+#
+#   - python-package.yml ("Kombu") only triggers on `branches: ['main']`, but
+#     this fork develops on `master` and the `5.5.3-sendbird` release branch, so
+#     it has never run on a fork PR.
+#   - Every existing workflow targets `blacksmith-4vcpu-ubuntu-2204`, a runner
+#     label that is not available to this repository. They all end in
+#     `startup_failure` after 0s -- Linter has done so on every PR since at
+#     least 2026-05. Migrating them to GitHub-hosted runners also means fixing
+#     the fork's accumulated lint debt (redis_cluster.py alone has 18 pre-existing
+#     flake8 violations), which does not belong in a bugfix PR.
+#
+# This runs on GitHub-hosted runners so the transport's tests actually execute.
+name: Redis Cluster transport
+
+on:
+  push:
+    branches: ['master', '5.5.3-sendbird']
+    paths:
+      - 'kombu/transport/redis_cluster.py'
+      - 'kombu/transport/redis.py'
+      - 't/unit/transport/test_redis_cluster.py'
+      - 't/unit/transport/test_redis.py'
+      - '.github/workflows/redis-cluster-tests.yml'
+  pull_request:
+    branches: ['master', '5.5.3-sendbird']
+    paths:
+      - 'kombu/transport/redis_cluster.py'
+      - 'kombu/transport/redis.py'
+      - 't/unit/transport/test_redis_cluster.py'
+      - 't/unit/transport/test_redis.py'
+      - '.github/workflows/redis-cluster-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.13']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements/default.txt
+          python -m pip install -r requirements/extras/redis.txt
+          python -m pip install pytest
+          python -m pip install -e .
+
+      # Order matters. test_redis.py's fake socket is not isolated between
+      # modules -- running test_redis_cluster.py first makes its
+      # test_publish__consume teardown fail with "IndexError: pop from empty
+      # list" inside its own channel.close(). Alphabetical order is what the
+      # full `t/unit` run uses, and it is green there, so keep it.
+      - name: Run redis and redis_cluster transport tests
+        run: >
+          python -m pytest -v
+          t/unit/transport/test_redis.py
+          t/unit/transport/test_redis_cluster.py

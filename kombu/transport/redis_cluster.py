@@ -498,12 +498,37 @@ class Channel(RedisChannel):
 
             # Mostly copied from https://github.com/sendbird/redis-py/blob/master/redis/cluster.py#L1173
             if isinstance(e, ConnectionError) or isinstance(e, TimeoutError):
+                nodes_manager = conn.cluster_connection.nodes_manager
+                # Snapshot before popping. With dynamic_startup_nodes a
+                # SUCCESSFUL initialize() replaces startup_nodes with the
+                # rediscovered topology, so the pop undoes itself. A FAILED one
+                # leaves the entry gone for good, and every later failure shrinks
+                # the list further until it is empty -- at which point
+                # initialize() iterates nothing, can never reach a node again,
+                # and this consumer is permanently detached while the process
+                # stays alive.
+                #
+                # That is not hypothetical on a single-endpoint broker: ElastiCache
+                # Serverless publishes one hostname as two startup nodes, so a
+                # single endpoint-level event fails both at once. It took an
+                # insight worker down for 2.5 days.
+                seed_nodes = dict(nodes_manager.startup_nodes)
                 try:
                     node = conn.cluster_connection.get_node_from_key(conn.key)
-                    conn.cluster_connection.nodes_manager.startup_nodes.pop(node.name, None)
+                    nodes_manager.startup_nodes.pop(node.name, None)
                 except:
                     logger.exception('Error while removing node', extra={"key": conn.key})
-                conn.cluster_connection.nodes_manager.initialize()
+                try:
+                    nodes_manager.initialize()
+                except Exception:
+                    # Unguarded, this masks the original error with a
+                    # RedisClusterException AND skips the _unregister below, so
+                    # the caller sees the wrong failure and the dead connection
+                    # is never taken out of the poller.
+                    logger.exception('Error while reinitializing cluster nodes', extra={"key": conn.key})
+                    # Put the seed list back so the next attempt still has
+                    # somewhere to rediscover from.
+                    nodes_manager.startup_nodes = seed_nodes
             elif isinstance(e, MovedError):
                 conn.cluster_connection.reinitialize_counter += 1
                 if conn.cluster_connection._should_reinitialized():
