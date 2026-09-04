@@ -6,6 +6,7 @@ ElastiCache Serverless broker and never reattached, while the process stayed
 alive and the pod stayed Ready for 2.5 days.
 """
 
+from queue import Empty
 from unittest.mock import Mock
 
 import pytest
@@ -64,6 +65,7 @@ class _Channel:
     """
 
     parse_response = Channel.parse_response
+    _brpop_read = Channel._brpop_read
 
     def __init__(self):
         self.connection = Mock()
@@ -168,3 +170,79 @@ def test_successful_read_is_returned_untouched():
 
     assert channel.parse_response(conn, 'BRPOP') == [b'queue', b'{}']
     assert nodes_manager.initialize_calls == 0
+
+
+# A `close()`-time BRPOP drain that times out on an idle queue is expected,
+# not a failure: `close()` swallows it via `except Empty`. Logging it at
+# ERROR (logger.exception) turns every idle worker shutdown into a Sentry
+# event. `is_close=True` must downgrade that one case to DEBUG while every
+# other call site keeps logging at ERROR.
+
+
+def test_close_time_timeout_is_not_logged_as_error(monkeypatch):
+    nodes_manager = _NodesManager(SERVERLESS_SEEDS)
+    conn = _make_conn(nodes_manager, TimeoutError('Timeout reading from socket'))
+    channel = _make_channel()
+
+    mock_logger = Mock()
+    monkeypatch.setattr('kombu.transport.redis_cluster.logger', mock_logger)
+
+    with pytest.raises(TimeoutError):
+        channel.parse_response(conn, 'BRPOP', is_close=True)
+
+    mock_logger.exception.assert_not_called()
+    mock_logger.debug.assert_called_once()
+
+
+def test_close_time_connection_error_is_still_logged_as_error(monkeypatch):
+    """Only the expected-timeout case is downgraded; real errors during
+    close still surface at ERROR."""
+    nodes_manager = _NodesManager(SERVERLESS_SEEDS)
+    conn = _make_conn(nodes_manager, ConnectionError('closed by server'))
+    channel = _make_channel()
+
+    mock_logger = Mock()
+    monkeypatch.setattr('kombu.transport.redis_cluster.logger', mock_logger)
+
+    with pytest.raises(ConnectionError):
+        channel.parse_response(conn, 'BRPOP', is_close=True)
+
+    mock_logger.exception.assert_called_once()
+
+
+def test_non_close_timeout_is_still_logged_as_error(monkeypatch):
+    """Normal-operation BRPOP timeouts (is_close unset) keep logging at
+    ERROR -- only the close()-drain path is special-cased."""
+    nodes_manager = _NodesManager(SERVERLESS_SEEDS)
+    conn = _make_conn(nodes_manager, TimeoutError('Timeout reading from socket'))
+    channel = _make_channel()
+
+    mock_logger = Mock()
+    monkeypatch.setattr('kombu.transport.redis_cluster.logger', mock_logger)
+
+    with pytest.raises(TimeoutError):
+        channel.parse_response(conn, 'BRPOP')
+
+    mock_logger.exception.assert_called_once()
+    mock_logger.debug.assert_not_called()
+
+
+def test_close_calls_brpop_read_with_is_close(monkeypatch):
+    """
+    Wiring check for the actual regression path: `close()` -> `_brpop_read`
+    -> `parse_response` must carry `is_close=True` end to end, not just when
+    `parse_response` is called directly.
+    """
+    nodes_manager = _NodesManager(SERVERLESS_SEEDS)
+    conn = _make_conn(nodes_manager, TimeoutError('Timeout reading from socket'))
+    channel = _make_channel()
+
+    mock_logger = Mock()
+    monkeypatch.setattr('kombu.transport.redis_cluster.logger', mock_logger)
+
+    with pytest.raises(Empty):
+        channel._brpop_read(conn=conn, is_close=True)
+
+    mock_logger.exception.assert_not_called()
+    mock_logger.debug.assert_called_once()
+    assert conn.in_poll is False

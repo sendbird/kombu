@@ -417,7 +417,7 @@ class Channel(RedisChannel):
                   continue
 
                 try:
-                    self._brpop_read(conn=conn)
+                    self._brpop_read(conn=conn, is_close=True)
                 except Empty:
                     pass
                 except:
@@ -458,10 +458,11 @@ class Channel(RedisChannel):
 
     def _brpop_read(self, **options):
         conn = options.pop('conn')
+        is_close = options.pop('is_close', False)
 
         try:
             try:
-                resp = self.parse_response(conn, 'BRPOP', **options)
+                resp = self.parse_response(conn, 'BRPOP', is_close=is_close, **options)
             except:
                 # We should not throw error on this method to make kombu to continue operation
                 raise Empty()
@@ -491,10 +492,14 @@ class Channel(RedisChannel):
         self.connection._deliver(loads(bytes_to_str(item)), dest)
 
     def parse_response(self, conn, cmd, **options):
+        is_close = options.pop('is_close', False)
         try:
             return conn.redis_connection.parse_response(conn.redis_connection.connection, cmd, **options)
         except Exception as e:
-            logger.exception('Error while reading from Redis', extra={"key": conn.key})
+            if is_close and isinstance(e, TimeoutError):
+                logger.debug('Timeout draining pending BRPOP response before close', extra={"key": conn.key})
+            else:
+                logger.exception('Error while reading from Redis', extra={"key": conn.key})
 
             # Mostly copied from https://github.com/sendbird/redis-py/blob/master/redis/cluster.py#L1173
             if isinstance(e, ConnectionError) or isinstance(e, TimeoutError):
