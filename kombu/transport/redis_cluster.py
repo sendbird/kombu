@@ -410,6 +410,8 @@ class Channel(RedisChannel):
         return RedisClusterConnection.get_producer_connection(parsed['hostname'], parsed['port'], parsed['password'], ssl)
 
     def close(self):
+        already_closed = self.closed
+
         if self.connection and self.connection.cycle:
 
             for _, conn, _ in list(self.connection.cycle._chan_to_sock.keys()):
@@ -424,6 +426,9 @@ class Channel(RedisChannel):
                     logger.exception('Error while closing channel', extra={"key": conn.key})
 
         super().close()
+
+        if already_closed:
+            return
 
         RedisClusterConnection.close(self.client)
         if self.consumer_created is True:
