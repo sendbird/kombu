@@ -501,8 +501,8 @@ class Channel(RedisChannel):
         try:
             return conn.redis_connection.parse_response(conn.redis_connection.connection, cmd, **options)
         except Exception as e:
-            if is_close and isinstance(e, TimeoutError):
-                logger.debug('Timeout draining pending BRPOP response before close', extra={"key": conn.key})
+            if is_close and isinstance(e, (TimeoutError, ConnectionError)):
+                logger.debug('Timeout/connection error draining pending BRPOP response before close', extra={"key": conn.key})
             else:
                 logger.exception('Error while reading from Redis', extra={"key": conn.key})
 

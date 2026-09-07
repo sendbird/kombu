@@ -172,11 +172,11 @@ def test_successful_read_is_returned_untouched():
     assert nodes_manager.initialize_calls == 0
 
 
-# A `close()`-time BRPOP drain that times out on an idle queue is expected,
-# not a failure: `close()` swallows it via `except Empty`. Logging it at
-# ERROR (logger.exception) turns every idle worker shutdown into a Sentry
-# event. `is_close=True` must downgrade that one case to DEBUG while every
-# other call site keeps logging at ERROR.
+# A `close()`-time BRPOP drain that times out, or hits a connection error,
+# on an idle queue is expected, not a failure: `close()` swallows it via
+# `except Empty`. Logging it at ERROR (logger.exception) turns every idle
+# worker shutdown into a Sentry event. `is_close=True` must downgrade both
+# cases to DEBUG while every other call site keeps logging at ERROR.
 
 
 def test_close_time_timeout_is_not_logged_as_error(monkeypatch):
@@ -194,9 +194,7 @@ def test_close_time_timeout_is_not_logged_as_error(monkeypatch):
     mock_logger.debug.assert_called_once()
 
 
-def test_close_time_connection_error_is_still_logged_as_error(monkeypatch):
-    """Only the expected-timeout case is downgraded; real errors during
-    close still surface at ERROR."""
+def test_close_time_connection_error_is_not_logged_as_error(monkeypatch):
     nodes_manager = _NodesManager(SERVERLESS_SEEDS)
     conn = _make_conn(nodes_manager, ConnectionError('closed by server'))
     channel = _make_channel()
@@ -207,7 +205,25 @@ def test_close_time_connection_error_is_still_logged_as_error(monkeypatch):
     with pytest.raises(ConnectionError):
         channel.parse_response(conn, 'BRPOP', is_close=True)
 
+    mock_logger.exception.assert_not_called()
+    mock_logger.debug.assert_called_once()
+
+
+def test_non_close_connection_error_is_still_logged_as_error(monkeypatch):
+    """Normal-operation ConnectionErrors (is_close unset) keep logging at
+    ERROR -- only the close()-drain path is special-cased."""
+    nodes_manager = _NodesManager(SERVERLESS_SEEDS)
+    conn = _make_conn(nodes_manager, ConnectionError('closed by server'))
+    channel = _make_channel()
+
+    mock_logger = Mock()
+    monkeypatch.setattr('kombu.transport.redis_cluster.logger', mock_logger)
+
+    with pytest.raises(ConnectionError):
+        channel.parse_response(conn, 'BRPOP')
+
     mock_logger.exception.assert_called_once()
+    mock_logger.debug.assert_not_called()
 
 
 def test_non_close_timeout_is_still_logged_as_error(monkeypatch):
