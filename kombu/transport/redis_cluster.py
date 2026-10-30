@@ -185,27 +185,50 @@ class ClusterPoller(MultiChannelPoller):
             redis_connection = conn.cluster_connection.get_redis_connection(node)
             conn.redis_connection = redis_connection.client()
 
+        conn.redis_connection.connection.connect()
+        self._register_socket(channel, conn, cmd)
+
+    def _register_socket(self, channel, conn, cmd):
+        self._unregister_socket(channel, conn, cmd)
         sock = conn.redis_connection.connection._sock
-        self._fd_to_chan[sock.fileno()] = (channel, conn, cmd)
-        self._chan_to_sock[ident] = sock
-        self._sock_to_fd[sock] = sock.fileno()
         self.poller.register(sock, self.eventflags)
+        fd = sock.fileno()
+        self._fd_to_chan[fd] = (channel, conn, cmd)
+        self._chan_to_sock[(channel, conn, cmd)] = sock
+        self._sock_to_fd[sock] = fd
+
+    def _client_registered(self, channel, conn, cmd):
+        ident = (channel, conn, cmd)
+        client = conn.redis_connection
+        sock = client.connection._sock if client and client.connection else None
+        return (sock is not None and sock.fileno() >= 0 and
+                self._chan_to_sock.get(ident) is sock and
+                self._sock_to_fd.get(sock) == sock.fileno() and
+                self._fd_to_chan.get(sock.fileno()) == ident)
+
+    def _unregister_socket(self, channel, conn, cmd):
+        ident = (channel, conn, cmd)
+        sock = self._chan_to_sock.pop(ident, None)
+        fd = self._sock_to_fd.pop(sock, None)
+        # A reused descriptor may already belong to another consumer.
+        if fd is not None and self._fd_to_chan.get(fd) == ident:
+            self._fd_to_chan.pop(fd, None)
+            try:
+                self.poller.unregister(fd)
+            except (KeyError, ValueError, OSError):
+                logger.debug('Redis socket already unregistered', exc_info=True)
 
     def _unregister(self, channel, conn, cmd):
-        sock = self._chan_to_sock[(channel, conn, cmd)]
-        fd = self._sock_to_fd[sock]
-
-        self.poller.unregister(sock)
-        if conn.redis_connection:
-            if conn.redis_connection.connection:
-                # There might be pending BRPOP response on the connection, so we disconnect to ensure safety
-                conn.redis_connection.connection.disconnect()
-            conn.redis_connection.close()
-            conn.redis_connection = None
-
-        del self._fd_to_chan[fd]
-        del self._chan_to_sock[(channel, conn, cmd)]
-        del self._sock_to_fd[sock]
+        self._unregister_socket(channel, conn, cmd)
+        client, conn.redis_connection = conn.redis_connection, None
+        conn.in_poll = False
+        if client:
+            try:
+                # Discard any pending BRPOP response before returning the client.
+                if client.connection:
+                    client.connection.disconnect()
+            finally:
+                client.close()
 
     def discard(self, channel):
         super().discard(channel)
@@ -221,11 +244,12 @@ class ClusterPoller(MultiChannelPoller):
         for conn in conns:
             ident = (channel, conn, 'BRPOP')
 
-            if (ident not in self._chan_to_sock):
+            if not self._client_registered(*ident):
                 try:
                     self._register(*ident)
                 except:
                     logger.exception('Error while registering BRPOP', extra={"key": conn.key})
+                    self._unregister(*ident)
 
         timeout = channel.connection.client.transport_options.get('brpop_timeout', 1)
         channel._brpop_start(timeout)
@@ -249,7 +273,8 @@ class ClusterPoller(MultiChannelPoller):
 
     def _get_conns_for_channel(self, channel):
         result = []
-        conns = [conn for _, conn, _ in self._chan_to_sock]
+        conns = [conn for owner, conn, _ in self._chan_to_sock
+                 if owner is channel]
         for key in channel.active_queues:
             for client in channel.consumer_clients:
                 try:
@@ -424,7 +449,9 @@ class Channel(RedisChannel):
 
         for key in queues:
             for client in self.consumer_clients:
-                for _, conn, _ in self.connection.cycle._chan_to_sock:
+                for owner, conn, _ in list(self.connection.cycle._chan_to_sock):
+                    if owner is not self:
+                        continue
                     if conn.key == key and conn.in_poll == False and conn.cluster_connection == client:
                         conn.in_poll = True
                         conn.timeout = timeout
@@ -434,14 +461,23 @@ class Channel(RedisChannel):
                                 conn.redis_connection.execute_command('ASKING')
                             except:
                                 logger.exception('Error while sending ASKING', extra={"key": conn.key})
+                                self.connection.cycle._unregister(self, conn, 'BRPOP')
                                 continue
 
-                        try:
-                            conn.redis_connection.connection.send_command('BRPOP', key, timeout)
-                        except:
-                            logger.exception('Error while sending BRPOP', extra={"key": conn.key})
-                            self.connection.cycle._unregister(self, conn, 'BRPOP')
+                        self._send_brpop(conn)
                         break
+
+    def _send_brpop(self, conn):
+        try:
+            conn.redis_connection.connection.send_command('BRPOP', conn.key, conn.timeout)
+            # redis-py can reconnect while sending, replacing the watched socket.
+            cycle = self.connection.cycle
+            if not cycle._client_registered(self, conn, 'BRPOP'):
+                cycle._register_socket(self, conn, 'BRPOP')
+            conn.in_poll = True
+        except Exception:
+            logger.exception('Error while sending BRPOP', extra={"key": conn.key})
+            self.connection.cycle._unregister(self, conn, 'BRPOP')
 
     def _brpop_read(self, **options):
         conn = options.pop('conn')
@@ -452,7 +488,7 @@ class Channel(RedisChannel):
             # We should not throw error on this method to make kombu to continue operation
             raise Empty()
 
-        conn.redis_connection.connection.send_command('BRPOP', conn.key, conn.timeout)  # schedule next BRPOP
+        self._send_brpop(conn)  # schedule next BRPOP
 
         if resp:
             self.deliver_response(resp)
@@ -481,8 +517,17 @@ class Channel(RedisChannel):
             return conn.redis_connection.parse_response(conn.redis_connection.connection, cmd, **options)
         except Exception as e:
             logger.exception('Error while reading from Redis', extra={"key": conn.key})
+            if isinstance(e, TryAgainError):
+                return  # try again in next BRPOP
+            try:
+                self._recover_from_read_error(conn, e)
+            finally:
+                self.connection.cycle._unregister(self, conn, cmd)
+            raise
 
-            # Mostly copied from https://github.com/sendbird/redis-py/blob/master/redis/cluster.py#L1173
+    def _recover_from_read_error(self, conn, e):
+        # Mostly copied from https://github.com/sendbird/redis-py/blob/master/redis/cluster.py#L1173
+        try:
             if isinstance(e, ConnectionError) or isinstance(e, TimeoutError):
                 try:
                     node = conn.cluster_connection.get_node_from_key(conn.key)
@@ -502,15 +547,14 @@ class Channel(RedisChannel):
                 if conn.cluster_connection._should_reinitialized():
                     conn.cluster_connection.nodes_manager.initialize()
                     conn.cluster_connection.reinitialize_counter = 0
-            elif isinstance(e, TryAgainError):
-                return  # try again in next BRPOP
             elif isinstance(e, AskError):
                 self.add_ask_error(e, conn)
             elif isinstance(e, ClusterDownError):
                 conn.cluster_connection.nodes_manager.initialize()
 
-            self.connection.cycle._unregister(self, conn, cmd)
-            raise
+        except Exception:
+            logger.exception('Error while recovering Redis Cluster topology',
+                             extra={"key": conn.key})
 
     def add_ask_error(self, e, conn):
         self.ask_errors[conn.key] = e
